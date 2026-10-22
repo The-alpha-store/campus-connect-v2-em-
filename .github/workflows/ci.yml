@@ -1,0 +1,105 @@
+name: CI
+
+# Runs on every push and pull request, and can be reused by the deploy workflow.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_call:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  android:
+    name: Android build and unit tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      # The repository has no gradlew script, so use the Gradle version the project pins.
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "9.3.1"
+
+      # build.gradle.kts signs debug builds with ./debug.keystore, which is not committed.
+      - name: Create a throwaway debug keystore
+        run: |
+          keytool -genkeypair -v -keystore debug.keystore \
+            -storepass android -keypass android -alias androiddebugkey \
+            -keyalg RSA -keysize 2048 -validity 10000 \
+            -dname "CN=Android Debug,O=Android,C=US"
+
+      - name: Unit tests
+        run: gradle --no-daemon :app:testDebugUnitTest
+
+      - name: Lint
+        run: gradle --no-daemon :app:lintDebug
+
+      - name: Build debug APK
+        run: gradle --no-daemon :app:assembleDebug
+
+      - name: Upload test and lint reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-reports
+          path: |
+            app/build/reports/tests/
+            app/build/reports/lint-results-debug.html
+          if-no-files-found: ignore
+
+      - name: Upload debug APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: campusconnect-debug-apk
+          path: app/build/outputs/apk/debug/*.apk
+          if-no-files-found: error
+
+  database:
+    name: Supabase schema, RLS and limits
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      DB_URL: postgresql://postgres:postgres@127.0.0.1:54322/postgres
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: supabase/setup-cli@v1
+        with:
+          version: latest
+
+      # Only what the database tests need: Postgres, Auth (creates auth.users) and Storage.
+      - name: Start local Supabase
+        run: supabase start -x realtime,studio,imgproxy,edge-runtime,logflare,vector,mailpit,postgres-meta,supavisor
+
+      # Applies supabase/migrations/* and then supabase/seed.sql from scratch.
+      - name: Apply migrations and seed from scratch
+        run: supabase db reset
+
+      # The migration must be safe to run again on a database that already has it.
+      - name: Migration is idempotent
+        run: |
+          for f in supabase/migrations/*.sql; do
+            psql "$DB_URL" -v ON_ERROR_STOP=1 -q -f "$f"
+          done
+
+      - name: Database lint
+        run: supabase db lint --level error --fail-on error
+
+      - name: Row-level security and limits tests (pgTAP)
+        run: supabase test db
+
+      - name: Stop local Supabase
+        if: always()
+        run: supabase stop --no-backup
