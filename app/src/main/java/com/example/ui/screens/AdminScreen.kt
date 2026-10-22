@@ -157,7 +157,8 @@ fun AdminScreen(
           modifier = Modifier.weight(1f),
           verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
-          items(pendingUsers) { pUser ->
+          items(pendingUsers, key = { it.id }) { pUser ->
+          Box(modifier = Modifier.animateItem()) {
             Card(
               shape = RoundedCornerShape(14.dp),
               colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
@@ -254,7 +255,9 @@ fun AdminScreen(
                 PendingActions(viewModel, pUser)
               }
             }
+          
           }
+        }
 
           item {
             Spacer(modifier = Modifier.height(24.dp))
@@ -322,18 +325,30 @@ fun AdminScreen(
  */
 @Composable
 private fun PendingActions(viewModel: CampusViewModel, pUser: UserProfile) {
-  val listed = viewModel.registryMatches(pUser)
+  val listed: Boolean? = viewModel.registryMatches(pUser)
   val wantsStaff = pUser.requestedRole == Role.LECTURER
   var teaches by remember(pUser.id) { mutableStateOf(setOf<String>()) }
   var confirm by remember(pUser.id) { mutableStateOf<String?>(null) }
-  val allCourses = remember { SeedUsers.courseCatalog.values.flatten().distinct().sorted() }
+  val allCourses = remember(pUser.universityId) { SeedUsers.catalogFor(pUser.universityId).values.flatten().distinct().sorted() }
 
   Column {
     Spacer(modifier = Modifier.height(10.dp))
     StatusBadge(
-      text = if (listed) "Found in the university list" else "NOT in the university list: check before approving",
-      backgroundColor = if (listed) SuccessGreenLight else WarmAmberLight,
-      contentColor = if (listed) SuccessGreen else Color(0xFF78350F)
+      text = when (listed) {
+        true -> "Found in your university list"
+        false -> "NOT in your university list: check before approving"
+        null -> "No university list uploaded yet: check the number yourself"
+      },
+      backgroundColor = when (listed) {
+        true -> SuccessGreenLight
+        false -> WarmAmberLight
+        null -> MaterialTheme.colorScheme.surfaceVariant
+      },
+      contentColor = when (listed) {
+        true -> SuccessGreen
+        false -> Color(0xFF78350F)
+        null -> MaterialTheme.colorScheme.onSurfaceVariant
+      }
     )
 
     if (wantsStaff) {
@@ -386,7 +401,7 @@ private fun PendingActions(viewModel: CampusViewModel, pUser: UserProfile) {
       }
 
       Button(
-        onClick = { viewModel.approveUser(pUser.id, Role.STUDENT, pUser.programme?.takeIf { it in SeedUsers.programmes }, emptySet()) },
+        onClick = { viewModel.approveUser(pUser.id, Role.STUDENT, pUser.programme?.takeIf { it in SeedUsers.programmesFor(pUser.universityId) }, emptySet()) },
         colors = ButtonDefaults.buttonColors(containerColor = SuccessGreen),
         modifier = Modifier.weight(1f).testTag("approve_btn_${pUser.id}")
       ) {

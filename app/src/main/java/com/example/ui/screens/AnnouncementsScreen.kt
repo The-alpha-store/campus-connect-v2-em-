@@ -188,7 +188,8 @@ fun AnnouncementsScreen(
           modifier = Modifier.weight(1f),
           verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
-          items(filteredList) { item ->
+          items(filteredList, key = { it.id }) { item ->
+          Box(modifier = Modifier.animateItem()) {
             AnnouncementCard(
               announcement = item,
               showReadCount = user.role != Role.STUDENT,
@@ -197,7 +198,9 @@ fun AnnouncementsScreen(
                 onOpenDetail(item.id)
               }
             )
+          
           }
+        }
 
           item {
             Spacer(modifier = Modifier.height(80.dp))

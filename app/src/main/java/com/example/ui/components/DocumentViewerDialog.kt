@@ -1,39 +1,40 @@
 package com.example.ui.components
 
+import android.content.Context
+import android.content.Intent
+import android.graphics.Bitmap
+import android.graphics.pdf.PdfRenderer
+import android.net.Uri
+import android.os.ParcelFileDescriptor
 import androidx.compose.foundation.background
-import androidx.compose.foundation.border
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.calculatePan
+import androidx.compose.foundation.gestures.calculateZoom
+import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.fillMaxHeight
+import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.ArrowBack
-import androidx.compose.material.icons.filled.ArrowForward
 import androidx.compose.material.icons.filled.Close
-import androidx.compose.material.icons.filled.Download
-import androidx.compose.material.icons.filled.Image
-import androidx.compose.material.icons.filled.PictureAsPdf
-import androidx.compose.material.icons.filled.Print
-import androidx.compose.material.icons.filled.Verified
-import androidx.compose.material.icons.filled.ZoomIn
-import androidx.compose.material.icons.filled.ZoomOut
-import androidx.compose.material3.Button
-import androidx.compose.material3.ButtonDefaults
-import androidx.compose.material3.Card
-import androidx.compose.material3.CardDefaults
-import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material.icons.filled.ErrorOutline
+import androidx.compose.material.icons.filled.OpenInNew
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -41,28 +42,51 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
-import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.clipToBounds
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.input.pointer.positionChanged
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.testTag
-import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
-import coil.compose.AsyncImage
+import coil.compose.SubcomposeAsyncImage
 import com.example.data.model.AttachmentFile
-import com.example.ui.theme.DangerRed
-import com.example.ui.theme.DeepBlue
-import com.example.ui.theme.SuccessGreen
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
 
+private val ViewerBackground = Color(0xFF111318)
+private val ViewerBar = Color(0xFF1B1E26)
+
+/**
+ * Full-screen viewer for PDFs and pictures.
+ *  - PDF pages are drawn by Android's PdfRenderer, one page at a time, as you scroll.
+ *  - Pictures are loaded with Coil.
+ *  - Pinch to zoom, drag to move when zoomed, double-tap to zoom in and out.
+ *  - Back or the close button leaves the viewer.
+ */
 @Composable
 fun DocumentViewerDialog(
   attachment: AttachmentFile,
@@ -70,332 +94,299 @@ fun DocumentViewerDialog(
   courseCode: String? = null,
   onDismiss: () -> Unit
 ) {
-  var currentPage by remember { mutableIntStateOf(1) }
-  val totalPages = if (attachment.isImage) 1 else 3
-  var zoomLevel by remember { mutableFloatStateOf(1.0f) }
+  val context = LocalContext.current
+  val subtitle = listOfNotNull(
+    attachment.fileSize.takeIf { it.isNotBlank() },
+    courseCode,
+    authorOrUploaderName
+  ).joinToString("  \u2022  ")
 
   Dialog(
     onDismissRequest = onDismiss,
-    properties = DialogProperties(usePlatformDefaultWidth = false)
+    properties = DialogProperties(usePlatformDefaultWidth = false, dismissOnClickOutside = false)
   ) {
-    Card(
-      shape = RoundedCornerShape(16.dp),
-      colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-      modifier = Modifier
-        .fillMaxWidth(0.96f)
-        .fillMaxHeight(0.92f)
-        .padding(8.dp)
-        .testTag("built_in_document_viewer_modal")
+    Surface(
+      color = ViewerBackground,
+      modifier = Modifier.fillMaxSize().testTag("built_in_document_viewer_modal")
     ) {
-      Column(modifier = Modifier.fillMaxSize()) {
-        // Viewer Top Bar
+      var pageLabel by remember { mutableStateOf<String?>(null) }
+
+      Column(modifier = Modifier.fillMaxSize().statusBarsPadding()) {
+        // Top bar
         Row(
           modifier = Modifier
             .fillMaxWidth()
-            .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f))
-            .padding(horizontal = 14.dp, vertical = 10.dp),
-          horizontalArrangement = Arrangement.SpaceBetween,
+            .background(ViewerBar)
+            .padding(horizontal = 4.dp, vertical = 6.dp),
           verticalAlignment = Alignment.CenterVertically
         ) {
-          Row(verticalAlignment = Alignment.CenterVertically) {
-            Box(
-              modifier = Modifier
-                .size(36.dp)
-                .clip(RoundedCornerShape(8.dp))
-                .background(if (attachment.isImage) Color(0xFFE0E7FF) else Color(0xFFFEE2E2)),
-              contentAlignment = Alignment.Center
-            ) {
-              Icon(
-                imageVector = if (attachment.isImage) Icons.Default.Image else Icons.Default.PictureAsPdf,
-                contentDescription = "Document Icon",
-                tint = if (attachment.isImage) DeepBlue else DangerRed,
-                modifier = Modifier.size(20.dp)
-              )
-            }
-
-            Spacer(modifier = Modifier.width(10.dp))
-
-            Column {
+          IconButton(onClick = onDismiss, modifier = Modifier.testTag("close_document_viewer_btn")) {
+            Icon(Icons.Default.Close, contentDescription = "Close", tint = Color.White)
+          }
+          Column(modifier = Modifier.weight(1f).padding(horizontal = 4.dp)) {
+            Text(
+              text = attachment.fileName,
+              color = Color.White,
+              style = MaterialTheme.typography.titleSmall,
+              fontWeight = FontWeight.SemiBold,
+              maxLines = 1,
+              overflow = TextOverflow.Ellipsis
+            )
+            if (subtitle.isNotBlank() || pageLabel != null) {
               Text(
-                text = attachment.fileName,
-                style = MaterialTheme.typography.titleSmall,
-                fontWeight = FontWeight.Bold,
-                maxLines = 1
-              )
-              Text(
-                text = "${attachment.fileSize} • ${if (attachment.isImage) "Image" else "PDF Document"}${if (courseCode != null) " • $courseCode" else ""}",
+                text = listOfNotNull(pageLabel, subtitle.takeIf { it.isNotBlank() }).joinToString("  \u2022  "),
+                color = Color(0xFFB6BDCB),
                 style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
               )
             }
           }
-
-          Row(verticalAlignment = Alignment.CenterVertically) {
-            // Zoom controls
-            IconButton(
-              onClick = { if (zoomLevel > 0.8f) zoomLevel -= 0.15f },
-              modifier = Modifier.size(32.dp)
-            ) {
-              Icon(Icons.Default.ZoomOut, contentDescription = "Zoom Out", modifier = Modifier.size(18.dp))
-            }
-            Text(
-              text = "${(zoomLevel * 100).toInt()}%",
-              style = MaterialTheme.typography.labelSmall,
-              fontWeight = FontWeight.Bold
-            )
-            IconButton(
-              onClick = { if (zoomLevel < 1.6f) zoomLevel += 0.15f },
-              modifier = Modifier.size(32.dp)
-            ) {
-              Icon(Icons.Default.ZoomIn, contentDescription = "Zoom In", modifier = Modifier.size(18.dp))
-            }
-
-            Spacer(modifier = Modifier.width(4.dp))
-
-            IconButton(
-              onClick = onDismiss,
-              modifier = Modifier.testTag("close_document_viewer_btn")
-            ) {
-              Icon(Icons.Default.Close, contentDescription = "Close Viewer")
+          if (attachment.uriString != null) {
+            IconButton(onClick = { openInAnotherApp(context, attachment) }) {
+              Icon(Icons.Default.OpenInNew, contentDescription = "Open in another app", tint = Color.White)
             }
           }
         }
 
-        HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.2f))
+        Box(modifier = Modifier.weight(1f).fillMaxWidth()) {
+          val uri = attachment.uriString
+          when {
+            uri == null -> ViewerMessage(
+              title = "Sample file",
+              body = "This is a sample entry with no file attached, so there is nothing to open."
+            )
+            attachment.isImage -> ImagePage(uri = uri, name = attachment.fileName)
+            else -> PdfPages(uri = uri, onPageLabel = { pageLabel = it })
+          }
+        }
+      }
+    }
+  }
+}
 
-        // Document Canvas / Scrollable View Area
-        Box(
-          modifier = Modifier
-            .weight(1f)
-            .fillMaxWidth()
-            .background(Color(0xFFE2E8F0))
-            .padding(16.dp),
-          contentAlignment = Alignment.TopCenter
-        ) {
-          // Document Sheet Paper representation
-          Card(
-            shape = RoundedCornerShape(8.dp),
-            colors = CardDefaults.cardColors(containerColor = Color.White),
-            elevation = CardDefaults.cardElevation(defaultElevation = 4.dp),
-            modifier = Modifier
-              .fillMaxWidth(0.96f)
-              .verticalScroll(rememberScrollState())
-              .border(1.dp, Color(0xFFCBD5E1), RoundedCornerShape(8.dp))
+// ---------- Pictures ----------
+
+@Composable
+private fun ImagePage(uri: String, name: String) {
+  ZoomBox(modifier = Modifier.fillMaxSize()) {
+    SubcomposeAsyncImage(
+      model = uri,
+      contentDescription = name,
+      contentScale = ContentScale.Fit,
+      modifier = Modifier.fillMaxSize(),
+      loading = { LoadingIndicator() },
+      error = { ViewerMessage("Could not open this picture", "The file may have been moved or deleted.") }
+    )
+  }
+}
+
+// ---------- PDF ----------
+
+private class PdfDoc(private val renderer: PdfRenderer, private val descriptor: ParcelFileDescriptor) {
+  // PdfRenderer allows one open page at a time, so renders take turns.
+  private val lock = Mutex()
+  val pageCount: Int = renderer.pageCount
+
+  suspend fun render(index: Int, widthPx: Int): Bitmap = lock.withLock {
+    withContext(Dispatchers.IO) {
+      val page = renderer.openPage(index)
+      try {
+        val height = (widthPx.toFloat() * page.height / page.width).toInt().coerceAtLeast(1)
+        val bitmap = Bitmap.createBitmap(widthPx, height, Bitmap.Config.ARGB_8888)
+        bitmap.eraseColor(android.graphics.Color.WHITE)
+        page.render(bitmap, null, null, PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY)
+        bitmap
+      } finally {
+        page.close()
+      }
+    }
+  }
+
+  fun close() {
+    runCatching { renderer.close() }
+    runCatching { descriptor.close() }
+  }
+}
+
+private sealed interface PdfLoad {
+  object Loading : PdfLoad
+  class Ready(val doc: PdfDoc) : PdfLoad
+  object Failed : PdfLoad
+}
+
+@Composable
+private fun PdfPages(uri: String, onPageLabel: (String?) -> Unit) {
+  val context = LocalContext.current
+
+  val load by produceState<PdfLoad>(PdfLoad.Loading, uri) {
+    value = withContext(Dispatchers.IO) {
+      try {
+        val fd = context.contentResolver.openFileDescriptor(Uri.parse(uri), "r")
+          ?: return@withContext PdfLoad.Failed
+        try {
+          PdfLoad.Ready(PdfDoc(PdfRenderer(fd), fd))
+        } catch (e: Exception) {
+          fd.close() // damaged, empty or password-protected
+          PdfLoad.Failed
+        }
+      } catch (e: Exception) {
+        PdfLoad.Failed
+      }
+    }
+  }
+
+  DisposableEffect(load) {
+    onDispose { (load as? PdfLoad.Ready)?.doc?.close() }
+  }
+
+  when (val state = load) {
+    is PdfLoad.Loading -> LoadingIndicator()
+    is PdfLoad.Failed -> ViewerMessage(
+      "Could not open this PDF",
+      "It may be damaged, protected by a password, or no longer on this phone."
+    )
+    is PdfLoad.Ready -> {
+      val doc = state.doc
+      val listState = rememberLazyListState()
+      val current by remember { derivedStateOf { listState.firstVisibleItemIndex + 1 } }
+      androidx.compose.runtime.LaunchedEffect(current, doc) { onPageLabel("Page $current of ${doc.pageCount}") }
+
+      ZoomBox(modifier = Modifier.fillMaxSize()) {
+        BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
+          val density = LocalDensity.current
+          // Draw at about 1.6x the screen width so zooming stays sharp.
+          val widthPx = with(density) { (maxWidth * 1.6f).roundToPx() }.coerceIn(480, 2400)
+
+          LazyColumn(
+            state = listState,
+            modifier = Modifier.fillMaxSize(),
+            verticalArrangement = Arrangement.spacedBy(10.dp),
+            contentPadding = androidx.compose.foundation.layout.PaddingValues(vertical = 10.dp)
           ) {
-            Column(modifier = Modifier.padding(20.dp)) {
-              if (attachment.isImage) {
-                // Image Document Presentation
-                Text(
-                  text = "IMAGE ATTACHMENT VIEW",
-                  style = MaterialTheme.typography.labelSmall,
-                  fontWeight = FontWeight.Bold,
-                  color = DeepBlue
-                )
-                Spacer(modifier = Modifier.height(10.dp))
-                if (attachment.uriString != null) {
-                  AsyncImage(
-                    model = attachment.uriString,
-                    contentDescription = attachment.fileName,
-                    modifier = Modifier
-                      .fillMaxWidth()
-                      .height(260.dp)
-                      .clip(RoundedCornerShape(8.dp))
-                  )
-                } else {
-                  Box(
-                    modifier = Modifier
-                      .fillMaxWidth()
-                      .height(240.dp)
-                      .clip(RoundedCornerShape(8.dp))
-                      .background(Color(0xFFF1F5F9))
-                      .border(1.dp, Color(0xFFE2E8F0), RoundedCornerShape(8.dp)),
-                    contentAlignment = Alignment.Center
-                  ) {
-                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                      Icon(
-                        imageVector = Icons.Default.Image,
-                        contentDescription = "Image preview",
-                        tint = DeepBlue,
-                        modifier = Modifier.size(54.dp)
-                      )
-                      Spacer(modifier = Modifier.height(8.dp))
-                      Text(
-                        text = "Scanned Assignment Solution Diagram",
-                        style = MaterialTheme.typography.bodyMedium,
-                        fontWeight = FontWeight.Bold,
-                        color = Color(0xFF1E293B)
-                      )
-                      Text(
-                        text = "High resolution photo (1920 x 1080) • Verified readable",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                      )
-                    }
-                  }
-                }
-              } else {
-                // PDF Document Presentation
-                // Institutional Header
-                Row(
-                  modifier = Modifier.fillMaxWidth(),
-                  horizontalArrangement = Arrangement.SpaceBetween,
-                  verticalAlignment = Alignment.CenterVertically
-                ) {
-                  Column {
-                    Text(
-                      text = "CAMPUSCONNECT UNIVERSITY OF TANZANIA",
-                      style = MaterialTheme.typography.labelSmall,
-                      fontWeight = FontWeight.Bold,
-                      color = DeepBlue,
-                      fontSize = 11.sp
-                    )
-                    Text(
-                      text = "Faculty of Computing & Information Technology",
-                      style = MaterialTheme.typography.labelSmall,
-                      color = Color(0xFF64748B)
-                    )
-                  }
-                  Row(verticalAlignment = Alignment.CenterVertically) {
-                    Icon(
-                      imageVector = Icons.Default.Verified,
-                      contentDescription = "Verified Official",
-                      tint = SuccessGreen,
-                      modifier = Modifier.size(16.dp)
-                    )
-                    Spacer(modifier = Modifier.width(4.dp))
-                    Text(
-                      text = "Official Academic Doc",
-                      style = MaterialTheme.typography.labelSmall,
-                      color = SuccessGreen,
-                      fontWeight = FontWeight.Bold
-                    )
-                  }
-                }
-
-                Spacer(modifier = Modifier.height(14.dp))
-                HorizontalDivider(color = Color(0xFFE2E8F0))
-                Spacer(modifier = Modifier.height(14.dp))
-
-                // Document Title
-                Text(
-                  text = attachment.fileName.substringBeforeLast("."),
-                  style = MaterialTheme.typography.titleLarge,
-                  fontWeight = FontWeight.Bold,
-                  color = Color(0xFF0F172A)
-                )
-
-                if (authorOrUploaderName != null) {
-                  Spacer(modifier = Modifier.height(4.dp))
-                  Text(
-                    text = "Contributor / Uploader: $authorOrUploaderName",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = Color(0xFF475569),
-                    fontWeight = FontWeight.Medium
-                  )
-                }
-
-                Spacer(modifier = Modifier.height(14.dp))
-
-                // Document Body Content
-                Text(
-                  text = attachment.previewText ?: "DOCUMENT CONTENT OVERVIEW:\n\n1. Abstract & Scope\nThis academic document outlines verified lecture curriculum materials, mathematical proofs, and assignment requirements.\n\n2. Implementation Specifications\nStudents must adhere to standard time complexity constraints O(V + E) and ensure memory bounds are respected.\n\n3. Verification & Grading Matrix\n- Correctness: 50 points\n- Test Case Coverage: 30 points\n- Documentation & Code Cleanliness: 20 points.",
-                  style = MaterialTheme.typography.bodyMedium,
-                  color = Color(0xFF1E293B),
-                  lineHeight = 22.sp,
-                  fontFamily = if (attachment.previewText?.contains("class") == true) FontFamily.Monospace else FontFamily.Default
-                )
-
-                Spacer(modifier = Modifier.height(20.dp))
-
-                // Watermark & Page Footer
-                Row(
-                  modifier = Modifier.fillMaxWidth(),
-                  horizontalArrangement = Arrangement.SpaceBetween,
-                  verticalAlignment = Alignment.CenterVertically
-                ) {
-                  Text(
-                    text = "CampusConnect Secure Viewer • Verified Copy",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = Color(0xFF94A3B8)
-                  )
-                  Text(
-                    text = "Page $currentPage of $totalPages",
-                    style = MaterialTheme.typography.labelSmall,
-                    fontWeight = FontWeight.Bold,
-                    color = Color(0xFF64748B)
-                  )
-                }
-              }
-            }
-          }
-        }
-
-        HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.2f))
-
-        // Viewer Bottom Control Bar
-        Row(
-          modifier = Modifier
-            .fillMaxWidth()
-            .background(MaterialTheme.colorScheme.surface)
-            .padding(horizontal = 14.dp, vertical = 10.dp),
-          horizontalArrangement = Arrangement.SpaceBetween,
-          verticalAlignment = Alignment.CenterVertically
-        ) {
-          // Pagination controls
-          if (!attachment.isImage) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-              OutlinedButton(
-                onClick = { if (currentPage > 1) currentPage-- },
-                enabled = currentPage > 1,
-                contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 8.dp, vertical = 4.dp),
-                modifier = Modifier.height(34.dp)
-              ) {
-                Icon(Icons.Default.ArrowBack, contentDescription = "Prev", modifier = Modifier.size(14.dp))
-                Spacer(modifier = Modifier.width(4.dp))
-                Text("Prev", style = MaterialTheme.typography.labelSmall)
-              }
-
-              Spacer(modifier = Modifier.width(8.dp))
-
-              Text(
-                text = "Page $currentPage / $totalPages",
-                style = MaterialTheme.typography.labelMedium,
-                fontWeight = FontWeight.Bold
-              )
-
-              Spacer(modifier = Modifier.width(8.dp))
-
-              OutlinedButton(
-                onClick = { if (currentPage < totalPages) currentPage++ },
-                enabled = currentPage < totalPages,
-                contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 8.dp, vertical = 4.dp),
-                modifier = Modifier.height(34.dp)
-              ) {
-                Text("Next", style = MaterialTheme.typography.labelSmall)
-                Spacer(modifier = Modifier.width(4.dp))
-                Icon(Icons.Default.ArrowForward, contentDescription = "Next", modifier = Modifier.size(14.dp))
-              }
-            }
-          } else {
-            Text(
-              text = "Full Resolution Image",
-              style = MaterialTheme.typography.labelSmall,
-              fontWeight = FontWeight.Bold,
-              color = DeepBlue
-            )
-          }
-
-          Row {
-            Button(
-              onClick = onDismiss,
-              colors = ButtonDefaults.buttonColors(containerColor = DeepBlue),
-              modifier = Modifier.height(36.dp)
-            ) {
-              Text("Close Document")
+            itemsIndexed(List(doc.pageCount) { it }, key = { _, page -> page }) { _, index ->
+              PdfPageImage(doc = doc, index = index, widthPx = widthPx)
             }
           }
         }
       }
     }
   }
+}
+
+@Composable
+private fun PdfPageImage(doc: PdfDoc, index: Int, widthPx: Int) {
+  val bitmap by produceState<Bitmap?>(null, doc, index, widthPx) {
+    value = try {
+      doc.render(index, widthPx)
+    } catch (e: Exception) {
+      null
+    }
+  }
+  val image = bitmap
+  if (image != null) {
+    Image(
+      bitmap = image.asImageBitmap(),
+      contentDescription = "Page ${index + 1}",
+      contentScale = ContentScale.FillWidth,
+      modifier = Modifier.fillMaxWidth()
+    )
+  } else {
+    // Keeps the scroll position steady while the page is drawn.
+    Box(
+      modifier = Modifier.fillMaxWidth().aspectRatio(0.707f).background(Color(0xFF1B1E26)),
+      contentAlignment = Alignment.Center
+    ) { CircularProgressIndicator(strokeWidth = 2.dp, modifier = Modifier.size(24.dp), color = Color(0xFF8FA8FF)) }
+  }
+}
+
+// ---------- Zoom and pan ----------
+
+/**
+ * Pinch to zoom (1x to 5x), drag to pan while zoomed, double-tap to jump in and out.
+ * With one finger at 1x the gesture is left alone, so lists inside still scroll normally.
+ */
+@Composable
+private fun ZoomBox(modifier: Modifier = Modifier, content: @Composable () -> Unit) {
+  var scale by remember { mutableFloatStateOf(1f) }
+  var offset by remember { mutableStateOf(Offset.Zero) }
+
+  Box(
+    modifier = modifier
+      .clipToBounds()
+      .pointerInput(Unit) {
+        detectTapGestures(onDoubleTap = {
+          if (scale > 1f) {
+            scale = 1f
+            offset = Offset.Zero
+          } else {
+            scale = 2.5f
+          }
+        })
+      }
+      .pointerInput(Unit) {
+        awaitEachGesture {
+          awaitFirstDown(requireUnconsumed = false)
+          do {
+            val event = awaitPointerEvent()
+            val zoom = event.calculateZoom()
+            val pan = event.calculatePan()
+            if (event.changes.size > 1 || scale > 1f) {
+              val newScale = (scale * zoom).coerceIn(1f, 5f)
+              scale = newScale
+              offset = if (newScale > 1f) {
+                val maxX = size.width * (newScale - 1f) / 2f
+                val maxY = size.height * (newScale - 1f) / 2f
+                Offset(
+                  (offset.x + pan.x).coerceIn(-maxX, maxX),
+                  (offset.y + pan.y).coerceIn(-maxY, maxY)
+                )
+              } else {
+                Offset.Zero
+              }
+              event.changes.forEach { if (it.positionChanged()) it.consume() }
+            }
+          } while (event.changes.any { it.pressed })
+        }
+      }
+      .graphicsLayer {
+        scaleX = scale
+        scaleY = scale
+        translationX = offset.x
+        translationY = offset.y
+      }
+  ) { content() }
+}
+
+// ---------- Small pieces ----------
+
+@Composable
+private fun LoadingIndicator() {
+  Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+    CircularProgressIndicator(color = Color(0xFF8FA8FF))
+  }
+}
+
+@Composable
+private fun ViewerMessage(title: String, body: String) {
+  Column(
+    modifier = Modifier.fillMaxSize().padding(32.dp),
+    horizontalAlignment = Alignment.CenterHorizontally,
+    verticalArrangement = Arrangement.Center
+  ) {
+    Icon(Icons.Default.ErrorOutline, contentDescription = null, tint = Color(0xFFB6BDCB), modifier = Modifier.size(40.dp))
+    Spacer(modifier = Modifier.height(12.dp))
+    Text(title, color = Color.White, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold, textAlign = TextAlign.Center)
+    Spacer(modifier = Modifier.height(6.dp))
+    Text(body, color = Color(0xFFB6BDCB), style = MaterialTheme.typography.bodyMedium, textAlign = TextAlign.Center)
+  }
+}
+
+private fun openInAnotherApp(context: Context, attachment: AttachmentFile) {
+  val uri = attachment.uriString?.let { Uri.parse(it) } ?: return
+  val view = Intent(Intent.ACTION_VIEW).apply {
+    setDataAndType(uri, attachment.mimeType.ifBlank { if (attachment.isImage) "image/*" else "application/pdf" })
+    addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+  }
+  runCatching { context.startActivity(Intent.createChooser(view, null)) }
 }

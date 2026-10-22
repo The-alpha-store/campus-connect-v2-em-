@@ -1,5 +1,17 @@
 package com.example.ui.screens
 
+import androidx.activity.compose.BackHandler
+import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInHorizontally
+import androidx.compose.animation.slideOutHorizontally
+import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -18,17 +30,27 @@ import androidx.compose.foundation.layout.systemBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.HourglassTop
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.Badge
 import androidx.compose.material.icons.filled.Block
+import androidx.compose.material.icons.filled.Business
+import androidx.compose.material.icons.filled.Email
+import androidx.compose.material.icons.filled.HourglassTop
+import androidx.compose.material.icons.filled.Lock
+import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.filled.School
+import androidx.compose.material.icons.filled.Visibility
+import androidx.compose.material.icons.filled.VisibilityOff
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
@@ -36,17 +58,23 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.focus.FocusDirection
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
@@ -59,17 +87,17 @@ import com.example.data.auth.CodePurpose
 import com.example.data.auth.PasswordStrength
 import com.example.data.model.AccountStatus
 import com.example.data.model.AppLanguage
-import com.example.data.repository.SeedUsers
 import com.example.ui.theme.DangerRed
 import com.example.ui.theme.DeepBlue
 import com.example.ui.theme.SuccessGreen
 import com.example.ui.theme.WarmAmber
-import com.example.ui.theme.WarmAmberLight
 import com.example.viewmodel.CampusViewModel
 
 private enum class AuthPage { SIGN_IN, SIGN_UP, CODE, FORGOT, RESET }
 
-/** Shown to anyone who has not signed in. */
+private val FieldShape = RoundedCornerShape(14.dp)
+
+/** Shown to anyone who has not signed in. One calm column, one primary action per page. */
 @Composable
 fun AuthGate(viewModel: CampusViewModel) {
   val language by viewModel.appLanguage.collectAsState()
@@ -86,7 +114,9 @@ fun AuthGate(viewModel: CampusViewModel) {
     page = next
   }
 
-  // Returns the text of an error to show, or null when the flow moved on.
+  // Back returns to the sign-in page from any other page instead of closing the app.
+  BackHandler(enabled = page != AuthPage.SIGN_IN) { go(AuthPage.SIGN_IN) }
+
   fun handle(outcome: AuthOutcome) {
     when (outcome) {
       is AuthOutcome.Failure -> error = viewModel.authErrorText(outcome.error)
@@ -103,7 +133,7 @@ fun AuthGate(viewModel: CampusViewModel) {
         )
         go(AuthPage.SIGN_IN)
       }
-      is AuthOutcome.Success -> Unit // session started: the app switches screens by itself
+      is AuthOutcome.Success -> Unit // the app switches screens by itself
     }
   }
 
@@ -114,101 +144,109 @@ fun AuthGate(viewModel: CampusViewModel) {
       .systemBarsPadding()
       .imePadding()
       .verticalScroll(rememberScrollState())
-      .padding(horizontal = 20.dp, vertical = 12.dp)
+      .padding(horizontal = 24.dp, vertical = 12.dp)
       .testTag("auth_gate")
   ) {
-    LanguageSwitch(viewModel, language)
-    Spacer(modifier = Modifier.height(12.dp))
-
-    Row(verticalAlignment = Alignment.CenterVertically) {
-      Box(
-        modifier = Modifier.size(44.dp).clip(RoundedCornerShape(12.dp)).background(DeepBlue),
-        contentAlignment = Alignment.Center
-      ) {
-        Icon(Icons.Default.School, contentDescription = "CampusConnect", tint = Color.White, modifier = Modifier.size(26.dp))
+    // Top row: back (when not on the first page) and the language switch.
+    Row(
+      modifier = Modifier.fillMaxWidth().height(44.dp),
+      verticalAlignment = Alignment.CenterVertically,
+      horizontalArrangement = Arrangement.SpaceBetween
+    ) {
+      if (page != AuthPage.SIGN_IN) {
+        IconButton(onClick = { go(AuthPage.SIGN_IN) }, modifier = Modifier.testTag("auth_back_btn")) {
+          Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = viewModel.t("Back", "Rudi"))
+        }
+      } else {
+        Spacer(modifier = Modifier.size(1.dp))
       }
-      Spacer(modifier = Modifier.width(12.dp))
-      Text("CampusConnect", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
-    }
-    Spacer(modifier = Modifier.height(8.dp))
-    Text(
-      text = viewModel.t(
-        "Your timetable, announcements and deadlines in one place.",
-        "Ratiba, matangazo na tarehe za mwisho zako mahali pamoja."
-      ),
-      style = MaterialTheme.typography.bodyMedium,
-      color = MaterialTheme.colorScheme.onSurfaceVariant
-    )
-    Spacer(modifier = Modifier.height(20.dp))
-
-    if (shownCode != null && (page == AuthPage.CODE || page == AuthPage.RESET)) {
-      PrototypeCodeNotice(viewModel, shownCode ?: "")
-      Spacer(modifier = Modifier.height(12.dp))
+      LanguageSwitch(viewModel, language)
     }
 
-    notice?.let {
-      Text(it, color = SuccessGreen, style = MaterialTheme.typography.bodyMedium, modifier = Modifier.testTag("auth_notice"))
-      Spacer(modifier = Modifier.height(10.dp))
+    AnimatedContent(
+      targetState = page,
+      transitionSpec = {
+        val forward = targetState.ordinal >= initialState.ordinal
+        (fadeIn(tween(220)) + slideInHorizontally(tween(260)) { if (forward) it / 10 else -it / 10 }) togetherWith
+          (fadeOut(tween(120)) + slideOutHorizontally(tween(200)) { if (forward) -it / 10 else it / 10 })
+      },
+      label = "auth_page"
+    ) { current ->
+      Column(modifier = Modifier.fillMaxWidth()) {
+        if (current == AuthPage.SIGN_IN) {
+          Spacer(modifier = Modifier.height(16.dp))
+          AuthHeader(viewModel)
+          Spacer(modifier = Modifier.height(28.dp))
+        } else {
+          Spacer(modifier = Modifier.height(8.dp))
+        }
+
+        if (shownCode != null && (current == AuthPage.CODE || current == AuthPage.RESET)) {
+          PrototypeCodeNotice(viewModel, shownCode ?: "")
+          Spacer(modifier = Modifier.height(16.dp))
+        }
+
+        notice?.let {
+          Text(it, color = SuccessGreen, style = MaterialTheme.typography.bodyMedium, modifier = Modifier.testTag("auth_notice"))
+          Spacer(modifier = Modifier.height(12.dp))
+        }
+
+        when (current) {
+          AuthPage.SIGN_IN -> SignInPage(
+            viewModel = viewModel,
+            error = error,
+            onSubmit = { email, password ->
+              error = null
+              handle(viewModel.signIn(email, password))
+            },
+            onForgot = { notice = null; go(AuthPage.FORGOT) },
+            onCreate = { notice = null; go(AuthPage.SIGN_UP) }
+          )
+
+          AuthPage.SIGN_UP -> SignUpPage(
+            viewModel = viewModel,
+            error = error,
+            onError = { error = it },
+            onSubmit = { university, name, email, number, staff, programme, password ->
+              error = null
+              handle(viewModel.signUp(university, name, email, number, staff, programme, password))
+            }
+          )
+
+          AuthPage.CODE -> CodePage(
+            viewModel = viewModel,
+            purpose = codePurpose,
+            email = pendingEmail,
+            error = error,
+            onSubmit = { code ->
+              error = null
+              handle(viewModel.submitCode(codePurpose, pendingEmail, code))
+            },
+            onResend = {
+              error = null
+              viewModel.resendCode(codePurpose, pendingEmail)
+            }
+          )
+
+          AuthPage.FORGOT -> ForgotPage(
+            viewModel = viewModel,
+            onSubmit = { email -> handle(viewModel.requestPasswordReset(email)) }
+          )
+
+          AuthPage.RESET -> ResetPage(
+            viewModel = viewModel,
+            email = pendingEmail,
+            error = error,
+            onError = { error = it },
+            onSubmit = { code, password ->
+              error = null
+              handle(viewModel.resetPassword(pendingEmail, code, password))
+            }
+          )
+        }
+        Spacer(modifier = Modifier.height(24.dp))
+      }
     }
-
-    when (page) {
-      AuthPage.SIGN_IN -> SignInPage(
-        viewModel = viewModel,
-        error = error,
-        onSubmit = { email, password ->
-          error = null
-          handle(viewModel.signIn(email, password))
-        },
-        onForgot = { notice = null; go(AuthPage.FORGOT) },
-        onCreate = { notice = null; go(AuthPage.SIGN_UP) }
-      )
-
-      AuthPage.SIGN_UP -> SignUpPage(
-        viewModel = viewModel,
-        error = error,
-        onError = { error = it },
-        onSubmit = { name, email, number, staff, programme, password ->
-          error = null
-          handle(viewModel.signUp(name, email, number, staff, programme, password))
-        },
-        onBack = { go(AuthPage.SIGN_IN) }
-      )
-
-      AuthPage.CODE -> CodePage(
-        viewModel = viewModel,
-        purpose = codePurpose,
-        email = pendingEmail,
-        error = error,
-        onSubmit = { code ->
-          error = null
-          handle(viewModel.submitCode(codePurpose, pendingEmail, code))
-        },
-        onResend = {
-          error = null
-          viewModel.resendCode(codePurpose, pendingEmail)
-        },
-        onBack = { go(AuthPage.SIGN_IN) }
-      )
-
-      AuthPage.FORGOT -> ForgotPage(
-        viewModel = viewModel,
-        onSubmit = { email -> handle(viewModel.requestPasswordReset(email)) },
-        onBack = { go(AuthPage.SIGN_IN) }
-      )
-
-      AuthPage.RESET -> ResetPage(
-        viewModel = viewModel,
-        email = pendingEmail,
-        error = error,
-        onError = { error = it },
-        onSubmit = { code, password ->
-          error = null
-          handle(viewModel.resetPassword(pendingEmail, code, password))
-        },
-        onBack = { go(AuthPage.SIGN_IN) }
-      )
-    }
-    Spacer(modifier = Modifier.height(24.dp))
   }
 }
 
@@ -224,54 +262,46 @@ private fun SignInPage(
 ) {
   var email by remember { mutableStateOf("") }
   var password by remember { mutableStateOf("") }
+  val canSubmit = email.isNotBlank() && password.isNotEmpty()
 
-  Text(viewModel.t("Sign in", "Ingia"), style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
-  Spacer(modifier = Modifier.height(10.dp))
-  AuthField(email, { email = it }, viewModel.t("University email", "Barua pepe ya chuo"), "auth_email", KeyboardType.Email)
-  Spacer(modifier = Modifier.height(8.dp))
-  AuthField(password, { password = it }, viewModel.t("Password", "Nenosiri"), "auth_password", KeyboardType.Password, isPassword = true)
-  ErrorLine(error)
+  AuthField(
+    value = email, onChange = { email = it }, tag = "auth_email",
+    label = viewModel.t("Registration number or email", "Namba ya usajili au barua pepe"),
+    icon = Icons.Default.Badge
+  )
   Spacer(modifier = Modifier.height(12.dp))
-  Button(
-    onClick = { onSubmit(email, password) },
-    enabled = email.isNotBlank() && password.isNotEmpty(),
-    colors = ButtonDefaults.buttonColors(containerColor = DeepBlue),
-    modifier = Modifier.fillMaxWidth().testTag("auth_sign_in_btn")
-  ) { Text(viewModel.t("Sign in", "Ingia")) }
+  AuthField(
+    value = password, onChange = { password = it }, tag = "auth_password",
+    label = viewModel.t("Password", "Nenosiri"),
+    icon = Icons.Default.Lock, keyboard = KeyboardType.Password, isPassword = true,
+    imeAction = ImeAction.Done, onDone = { if (canSubmit) onSubmit(email, password) }
+  )
+  Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+    TextButton(onClick = onForgot, modifier = Modifier.testTag("auth_forgot_btn")) {
+      Text(viewModel.t("Forgot password?", "Umesahau nenosiri?"))
+    }
+  }
+  ErrorLine(error)
+  Spacer(modifier = Modifier.height(8.dp))
+  PrimaryAction(viewModel.t("Sign in", "Ingia"), canSubmit, "auth_sign_in_btn") { onSubmit(email, password) }
 
-  TextButton(onClick = onForgot, modifier = Modifier.testTag("auth_forgot_btn")) {
-    Text(viewModel.t("Forgot password?", "Umesahau nenosiri?"))
-  }
-  OutlinedButton(onClick = onCreate, modifier = Modifier.fillMaxWidth().testTag("auth_create_btn")) {
-    Text(viewModel.t("Create account", "Fungua akaunti"))
-  }
+  Spacer(modifier = Modifier.height(12.dp))
+  OutlinedButton(
+    onClick = onCreate,
+    shape = FieldShape,
+    modifier = Modifier.fillMaxWidth().height(52.dp).testTag("auth_create_btn")
+  ) { Text(viewModel.t("Create account", "Fungua akaunti"), fontWeight = FontWeight.SemiBold) }
 
   if (BuildConfig.DEMO_MODE_ENABLED) {
     Spacer(modifier = Modifier.height(20.dp))
-    Surface(
-      shape = RoundedCornerShape(12.dp),
-      color = WarmAmberLight,
-      modifier = Modifier.fillMaxWidth()
-    ) {
-      Column(modifier = Modifier.padding(14.dp)) {
-        Text(
-          viewModel.t("Demo mode", "Hali ya onyesho"),
-          style = MaterialTheme.typography.titleSmall,
-          fontWeight = FontWeight.Bold,
-          color = Color(0xFF78350F)
-        )
-        Text(
-          viewModel.t(
-            "Try the app as a student, lecturer or registry officer. Fake people and sample data only; nothing is saved.",
-            "Jaribu programu kama mwanafunzi, mhadhiri au afisa wa usajili. Watu wa kubuni na data za mfano tu; hakuna kinachohifadhiwa."
-          ),
-          style = MaterialTheme.typography.bodySmall,
-          color = Color(0xFF78350F)
-        )
-        Spacer(modifier = Modifier.height(8.dp))
-        OutlinedButton(onClick = { viewModel.startDemo() }, modifier = Modifier.testTag("auth_demo_btn")) {
-          Text(viewModel.t("Open demo", "Fungua onyesho"))
-        }
+    Column(modifier = Modifier.fillMaxWidth(), horizontalAlignment = Alignment.CenterHorizontally) {
+      Text(
+        viewModel.t("Just looking around?", "Unatazama tu?"),
+        style = MaterialTheme.typography.bodySmall,
+        color = MaterialTheme.colorScheme.onSurfaceVariant
+      )
+      TextButton(onClick = { viewModel.startDemo() }, modifier = Modifier.testTag("auth_demo_btn")) {
+        Text(viewModel.t("Open the demo (sample data only)", "Fungua onyesho (data za mfano tu)"))
       }
     }
   }
@@ -282,74 +312,116 @@ private fun SignUpPage(
   viewModel: CampusViewModel,
   error: String?,
   onError: (String?) -> Unit,
-  onSubmit: (name: String, email: String, number: String, staff: Boolean, programme: String, password: String) -> Unit,
-  onBack: () -> Unit
+  onSubmit: (university: String, name: String, email: String, number: String, staff: Boolean, programme: String, password: String) -> Unit
 ) {
+  var universityId by remember { mutableStateOf(viewModel.universities.first().id) }
   var name by remember { mutableStateOf("") }
   var email by remember { mutableStateOf("") }
   var number by remember { mutableStateOf("") }
   var isStaff by remember { mutableStateOf(false) }
-  var programme by remember { mutableStateOf(SeedUsers.programmes.first()) }
-  var department by remember { mutableStateOf("") }
+  var programme by remember { mutableStateOf("") }
   var password by remember { mutableStateOf("") }
   var confirm by remember { mutableStateOf("") }
 
-  Text(viewModel.t("Create account", "Fungua akaunti"), style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
-  Spacer(modifier = Modifier.height(10.dp))
+  val programmes = viewModel.programmesFor(universityId)
+  // A campus with set-up programmes offers them as choices; otherwise the person just types theirs.
+  val chosenProgramme = if (programmes.isNotEmpty()) programme.ifBlank { programmes.first() }.takeIf { it in programmes } ?: programmes.first() else programme
 
-  Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-    ChoiceChip(viewModel.t("Student", "Mwanafunzi"), !isStaff, "auth_type_student") { isStaff = false }
-    ChoiceChip(viewModel.t("Staff", "Mfanyakazi"), isStaff, "auth_type_staff") { isStaff = true }
-  }
-  Spacer(modifier = Modifier.height(8.dp))
-
-  AuthField(name, { name = it }, viewModel.t("Full name", "Jina kamili"), "auth_name")
-  Spacer(modifier = Modifier.height(8.dp))
-  AuthField(email, { email = it }, viewModel.t("University email (name@campus.ac.tz)", "Barua pepe ya chuo (jina@campus.ac.tz)"), "auth_signup_email", KeyboardType.Email)
-  Spacer(modifier = Modifier.height(8.dp))
-  AuthField(
-    number,
-    { number = it },
-    if (isStaff) viewModel.t("Staff number (e.g. STF-CS-041)", "Namba ya mfanyakazi (mf. STF-CS-041)")
-    else viewModel.t("Registration number (e.g. T22-03-08492)", "Namba ya usajili (mf. T22-03-08492)"),
-    "auth_number"
+  PageTitle(
+    viewModel.t("Create your account", "Fungua akaunti yako"),
+    viewModel.t(
+      "Your university's registry approves every account before you can see anything.",
+      "Msajili wa chuo chako huidhinisha kila akaunti kabla hujaona chochote."
+    )
   )
-  Spacer(modifier = Modifier.height(8.dp))
 
-  if (isStaff) {
-    AuthField(department, { department = it }, viewModel.t("Department", "Idara"), "auth_department")
-  } else {
-    Text(viewModel.t("Programme", "Programu"), style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold)
-    Spacer(modifier = Modifier.height(4.dp))
-    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-      SeedUsers.programmes.forEach { p ->
-        ChoiceChip(p, programme == p, "auth_programme_$p") { programme = p }
+  // 1. Which university: all your data lives with it, and only its registry approves you.
+  Text(viewModel.t("Your university", "Chuo chako"), style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.onSurfaceVariant)
+  Spacer(modifier = Modifier.height(6.dp))
+  Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+    viewModel.universities.forEach { u ->
+      Segment("${u.name} (${u.shortName})", universityId == u.id, "auth_university_${u.id}", Modifier.fillMaxWidth()) {
+        universityId = u.id
+        programme = ""
       }
     }
   }
+  Spacer(modifier = Modifier.height(14.dp))
 
-  Spacer(modifier = Modifier.height(8.dp))
-  AuthField(password, { password = it }, viewModel.t("Password", "Nenosiri"), "auth_signup_password", KeyboardType.Password, isPassword = true)
+  Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+    Segment(viewModel.t("Student", "Mwanafunzi"), !isStaff, "auth_type_student", Modifier.weight(1f)) { isStaff = false }
+    Segment(viewModel.t("Staff", "Mfanyakazi"), isStaff, "auth_type_staff", Modifier.weight(1f)) { isStaff = true }
+  }
+  Spacer(modifier = Modifier.height(14.dp))
+
+  AuthField(name, { name = it }, viewModel.t("Full name", "Jina kamili"), "auth_name", icon = Icons.Default.Person)
+  Spacer(modifier = Modifier.height(10.dp))
+
+  // 2. The registration number comes first: it is your identity at your university.
+  AuthField(
+    number, { number = it },
+    if (isStaff) viewModel.t("Staff number", "Namba ya mfanyakazi") else viewModel.t("Registration number", "Namba ya usajili"),
+    "auth_number", icon = Icons.Default.Badge,
+    hint = viewModel.t("Write it exactly as your university does", "Iandike kama chuo chako kinavyoiandika")
+  )
+  Spacer(modifier = Modifier.height(10.dp))
+
+  if (isStaff) {
+    AuthField(programme, { programme = it }, viewModel.t("Department", "Idara"), "auth_department", icon = Icons.Default.Business)
+  } else if (programmes.isNotEmpty()) {
+    Text(viewModel.t("Programme", "Programu"), style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.onSurfaceVariant)
+    Spacer(modifier = Modifier.height(6.dp))
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+      programmes.forEach { p ->
+        Segment(p, chosenProgramme == p, "auth_programme_$p", Modifier.fillMaxWidth()) { programme = p }
+      }
+    }
+  } else {
+    AuthField(
+      programme, { programme = it }, viewModel.t("Programme (optional)", "Programu (hiari)"), "auth_programme_text",
+      icon = Icons.Default.School
+    )
+  }
+  Spacer(modifier = Modifier.height(10.dp))
+
+  // 3. Email is only for codes and password reset. Any address you can open will do.
+  AuthField(
+    email, { email = it }, viewModel.t("Email", "Barua pepe"), "auth_signup_email",
+    icon = Icons.Default.Email, keyboard = KeyboardType.Email,
+    hint = viewModel.t("Any email you can open", "Barua pepe yoyote unayoweza kuifungua")
+  )
+  Text(
+    viewModel.t("Used for sign-in codes and to reset your password.", "Hutumika kwa misimbo ya kuingia na kubadilisha nenosiri."),
+    style = MaterialTheme.typography.bodySmall,
+    color = MaterialTheme.colorScheme.onSurfaceVariant,
+    modifier = Modifier.padding(start = 4.dp, top = 4.dp)
+  )
+  Spacer(modifier = Modifier.height(10.dp))
+
+  AuthField(
+    password, { password = it }, viewModel.t("Password", "Nenosiri"), "auth_signup_password",
+    icon = Icons.Default.Lock, keyboard = KeyboardType.Password, isPassword = true
+  )
   PasswordHint(viewModel, password, email)
-  Spacer(modifier = Modifier.height(8.dp))
-  AuthField(confirm, { confirm = it }, viewModel.t("Repeat password", "Rudia nenosiri"), "auth_confirm_password", KeyboardType.Password, isPassword = true)
+  Spacer(modifier = Modifier.height(10.dp))
+
+  val canSubmit = name.isNotBlank() && email.isNotBlank() && number.isNotBlank() && password.isNotEmpty()
+  val submit = {
+    if (password != confirm) {
+      onError(viewModel.t("The two passwords are not the same.", "Manenosiri mawili hayafanani."))
+    } else {
+      onSubmit(universityId, name, email, number, isStaff, if (isStaff) programme else chosenProgramme, password)
+    }
+  }
+  AuthField(
+    confirm, { confirm = it }, viewModel.t("Repeat password", "Rudia nenosiri"), "auth_confirm_password",
+    icon = Icons.Default.Lock, keyboard = KeyboardType.Password, isPassword = true,
+    imeAction = ImeAction.Done, onDone = { if (canSubmit) submit() }
+  )
 
   ErrorLine(error)
-  Spacer(modifier = Modifier.height(12.dp))
-  Button(
-    onClick = {
-      if (password != confirm) {
-        onError(viewModel.t("The two passwords are not the same.", "Manenosiri mawili hayafanani."))
-      } else {
-        onSubmit(name, email, number, isStaff, if (isStaff) department else programme, password)
-      }
-    },
-    enabled = name.isNotBlank() && email.isNotBlank() && number.isNotBlank() && password.isNotEmpty(),
-    colors = ButtonDefaults.buttonColors(containerColor = DeepBlue),
-    modifier = Modifier.fillMaxWidth().testTag("auth_sign_up_btn")
-  ) { Text(viewModel.t("Create account", "Fungua akaunti")) }
-
-  TextButton(onClick = onBack) { Text(viewModel.t("Back to sign in", "Rudi kuingia")) }
+  Spacer(modifier = Modifier.height(16.dp))
+  PrimaryAction(viewModel.t("Create account", "Fungua akaunti"), canSubmit, "auth_sign_up_btn") { submit() }
 }
 
 @Composable
@@ -359,68 +431,50 @@ private fun CodePage(
   email: String,
   error: String?,
   onSubmit: (String) -> Unit,
-  onResend: () -> Unit,
-  onBack: () -> Unit
+  onResend: () -> Unit
 ) {
   var code by remember { mutableStateOf("") }
-  val title = if (purpose == CodePurpose.SECOND_STEP) {
-    viewModel.t("Second step", "Hatua ya pili")
-  } else {
-    viewModel.t("Check your email", "Angalia barua pepe yako")
-  }
-  Text(title, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
-  Spacer(modifier = Modifier.height(6.dp))
-  Text(
+
+  PageTitle(
+    if (purpose == CodePurpose.SECOND_STEP) viewModel.t("Second step", "Hatua ya pili")
+    else viewModel.t("Check your email", "Angalia barua pepe yako"),
     viewModel.t(
-      "We sent a six-digit code to $email. Enter it to continue.",
-      "Tumetuma msimbo wa tarakimu sita kwa $email. Uandike ili kuendelea."
-    ),
-    style = MaterialTheme.typography.bodyMedium,
-    color = MaterialTheme.colorScheme.onSurfaceVariant
+      "We sent a six-digit code to $email.",
+      "Tumetuma msimbo wa tarakimu sita kwa $email."
+    )
   )
-  Spacer(modifier = Modifier.height(10.dp))
-  AuthField(code, { code = it.filter(Char::isDigit).take(6) }, viewModel.t("Six-digit code", "Msimbo wa tarakimu sita"), "auth_code", KeyboardType.NumberPassword)
+  CodeField(
+    value = code,
+    onChange = { code = it.filter(Char::isDigit).take(6) },
+    tag = "auth_code",
+    onDone = { if (code.length == 6) onSubmit(code) }
+  )
   ErrorLine(error)
-  Spacer(modifier = Modifier.height(12.dp))
-  Button(
-    onClick = { onSubmit(code) },
-    enabled = code.length == 6,
-    colors = ButtonDefaults.buttonColors(containerColor = DeepBlue),
-    modifier = Modifier.fillMaxWidth().testTag("auth_code_btn")
-  ) { Text(viewModel.t("Continue", "Endelea")) }
-  Row {
+  Spacer(modifier = Modifier.height(16.dp))
+  PrimaryAction(viewModel.t("Continue", "Endelea"), code.length == 6, "auth_code_btn") { onSubmit(code) }
+  Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.Center) {
     TextButton(onClick = onResend) { Text(viewModel.t("Send a new code", "Tuma msimbo mpya")) }
-    TextButton(onClick = onBack) { Text(viewModel.t("Cancel", "Ghairi")) }
   }
 }
 
 @Composable
-private fun ForgotPage(
-  viewModel: CampusViewModel,
-  onSubmit: (String) -> Unit,
-  onBack: () -> Unit
-) {
+private fun ForgotPage(viewModel: CampusViewModel, onSubmit: (String) -> Unit) {
   var email by remember { mutableStateOf("") }
-  Text(viewModel.t("Forgot password", "Umesahau nenosiri"), style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
-  Spacer(modifier = Modifier.height(6.dp))
-  Text(
+
+  PageTitle(
+    viewModel.t("Forgot password", "Umesahau nenosiri"),
     viewModel.t(
       "Enter your university email. If it has an account, we send a code.",
       "Andika barua pepe yako ya chuo. Ikiwa ina akaunti, tutatuma msimbo."
-    ),
-    style = MaterialTheme.typography.bodyMedium,
-    color = MaterialTheme.colorScheme.onSurfaceVariant
+    )
   )
-  Spacer(modifier = Modifier.height(10.dp))
-  AuthField(email, { email = it }, viewModel.t("University email", "Barua pepe ya chuo"), "auth_forgot_email", KeyboardType.Email)
-  Spacer(modifier = Modifier.height(12.dp))
-  Button(
-    onClick = { onSubmit(email) },
-    enabled = email.isNotBlank(),
-    colors = ButtonDefaults.buttonColors(containerColor = DeepBlue),
-    modifier = Modifier.fillMaxWidth().testTag("auth_forgot_send_btn")
-  ) { Text(viewModel.t("Send code", "Tuma msimbo")) }
-  TextButton(onClick = onBack) { Text(viewModel.t("Back to sign in", "Rudi kuingia")) }
+  AuthField(
+    email, { email = it }, viewModel.t("University email", "Barua pepe ya chuo"), "auth_forgot_email",
+    icon = Icons.Default.Email, keyboard = KeyboardType.Email,
+    imeAction = ImeAction.Done, onDone = { if (email.isNotBlank()) onSubmit(email) }
+  )
+  Spacer(modifier = Modifier.height(16.dp))
+  PrimaryAction(viewModel.t("Send code", "Tuma msimbo"), email.isNotBlank(), "auth_forgot_send_btn") { onSubmit(email) }
 }
 
 @Composable
@@ -429,45 +483,44 @@ private fun ResetPage(
   email: String,
   error: String?,
   onError: (String?) -> Unit,
-  onSubmit: (code: String, password: String) -> Unit,
-  onBack: () -> Unit
+  onSubmit: (code: String, password: String) -> Unit
 ) {
   var code by remember { mutableStateOf("") }
   var password by remember { mutableStateOf("") }
   var confirm by remember { mutableStateOf("") }
 
-  Text(viewModel.t("Choose a new password", "Chagua nenosiri jipya"), style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
-  Spacer(modifier = Modifier.height(6.dp))
-  Text(
+  PageTitle(
+    viewModel.t("Choose a new password", "Chagua nenosiri jipya"),
     viewModel.t(
       "If $email has an account, a six-digit code was sent to it.",
       "Ikiwa $email ina akaunti, msimbo wa tarakimu sita umetumwa."
-    ),
-    style = MaterialTheme.typography.bodyMedium,
-    color = MaterialTheme.colorScheme.onSurfaceVariant
+    )
   )
-  Spacer(modifier = Modifier.height(10.dp))
-  AuthField(code, { code = it.filter(Char::isDigit).take(6) }, viewModel.t("Six-digit code", "Msimbo wa tarakimu sita"), "auth_reset_code", KeyboardType.NumberPassword)
-  Spacer(modifier = Modifier.height(8.dp))
-  AuthField(password, { password = it }, viewModel.t("New password", "Nenosiri jipya"), "auth_reset_password", KeyboardType.Password, isPassword = true)
-  PasswordHint(viewModel, password, email)
-  Spacer(modifier = Modifier.height(8.dp))
-  AuthField(confirm, { confirm = it }, viewModel.t("Repeat new password", "Rudia nenosiri jipya"), "auth_reset_confirm", KeyboardType.Password, isPassword = true)
-  ErrorLine(error)
+  CodeField(value = code, onChange = { code = it.filter(Char::isDigit).take(6) }, tag = "auth_reset_code", onDone = null)
   Spacer(modifier = Modifier.height(12.dp))
-  Button(
-    onClick = {
-      if (password != confirm) {
-        onError(viewModel.t("The two passwords are not the same.", "Manenosiri mawili hayafanani."))
-      } else {
-        onSubmit(code, password)
-      }
-    },
-    enabled = code.length == 6 && password.isNotEmpty(),
-    colors = ButtonDefaults.buttonColors(containerColor = DeepBlue),
-    modifier = Modifier.fillMaxWidth().testTag("auth_reset_btn")
-  ) { Text(viewModel.t("Change password", "Badilisha nenosiri")) }
-  TextButton(onClick = onBack) { Text(viewModel.t("Cancel", "Ghairi")) }
+  AuthField(
+    password, { password = it }, viewModel.t("New password", "Nenosiri jipya"), "auth_reset_password",
+    icon = Icons.Default.Lock, keyboard = KeyboardType.Password, isPassword = true
+  )
+  PasswordHint(viewModel, password, email)
+  Spacer(modifier = Modifier.height(10.dp))
+
+  val canSubmit = code.length == 6 && password.isNotEmpty()
+  val submit = {
+    if (password != confirm) {
+      onError(viewModel.t("The two passwords are not the same.", "Manenosiri mawili hayafanani."))
+    } else {
+      onSubmit(code, password)
+    }
+  }
+  AuthField(
+    confirm, { confirm = it }, viewModel.t("Repeat new password", "Rudia nenosiri jipya"), "auth_reset_confirm",
+    icon = Icons.Default.Lock, keyboard = KeyboardType.Password, isPassword = true,
+    imeAction = ImeAction.Done, onDone = { if (canSubmit) submit() }
+  )
+  ErrorLine(error)
+  Spacer(modifier = Modifier.height(16.dp))
+  PrimaryAction(viewModel.t("Change password", "Badilisha nenosiri"), canSubmit, "auth_reset_btn") { submit() }
 }
 
 // ---------- Waiting room ----------
@@ -479,24 +532,43 @@ fun WaitingRoomScreen(viewModel: CampusViewModel) {
   val language by viewModel.appLanguage.collectAsState()
   val notActive = user.status == AccountStatus.REJECTED
 
+  // A slow breathing pulse says "something is happening" without a spinner.
+  val pulse = rememberInfiniteTransition(label = "waiting_pulse")
+  val pulseAlpha by pulse.animateFloat(
+    initialValue = 0.45f,
+    targetValue = 1f,
+    animationSpec = infiniteRepeatable(tween(1200), RepeatMode.Reverse),
+    label = "waiting_alpha"
+  )
+
   Column(
     modifier = Modifier
       .fillMaxSize()
       .background(MaterialTheme.colorScheme.background)
       .systemBarsPadding()
-      .padding(20.dp)
+      .padding(24.dp)
       .testTag("waiting_room"),
     horizontalAlignment = Alignment.CenterHorizontally
   ) {
-    LanguageSwitch(viewModel, language)
+    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+      LanguageSwitch(viewModel, language)
+    }
     Spacer(modifier = Modifier.weight(1f))
-    Icon(
-      imageVector = if (notActive) Icons.Default.Block else Icons.Default.HourglassTop,
-      contentDescription = null,
-      tint = if (notActive) DangerRed else WarmAmber,
-      modifier = Modifier.size(56.dp)
-    )
-    Spacer(modifier = Modifier.height(16.dp))
+    Box(
+      modifier = Modifier
+        .size(96.dp)
+        .clip(RoundedCornerShape(28.dp))
+        .background((if (notActive) DangerRed else WarmAmber).copy(alpha = 0.14f)),
+      contentAlignment = Alignment.Center
+    ) {
+      Icon(
+        imageVector = if (notActive) Icons.Default.Block else Icons.Default.HourglassTop,
+        contentDescription = null,
+        tint = if (notActive) DangerRed else WarmAmber,
+        modifier = Modifier.size(44.dp).alpha(if (notActive) 1f else pulseAlpha)
+      )
+    }
+    Spacer(modifier = Modifier.height(24.dp))
     Text(
       text = if (notActive) viewModel.t("Account not active", "Akaunti haifanyi kazi")
       else viewModel.t("Awaiting approval", "Inasubiri idhini"),
@@ -504,13 +576,10 @@ fun WaitingRoomScreen(viewModel: CampusViewModel) {
       fontWeight = FontWeight.Bold,
       textAlign = TextAlign.Center
     )
-    Spacer(modifier = Modifier.height(8.dp))
+    Spacer(modifier = Modifier.height(10.dp))
     Text(
       text = if (notActive) {
-        viewModel.t(
-          "Please contact the Academic Registry.",
-          "Tafadhali wasiliana na Msajili wa Taaluma."
-        )
+        viewModel.t("Please contact the Academic Registry.", "Tafadhali wasiliana na Msajili wa Taaluma.")
       } else {
         viewModel.t(
           "The Academic Registry checks every new account. You will get a notification as soon as you are approved.",
@@ -521,38 +590,40 @@ fun WaitingRoomScreen(viewModel: CampusViewModel) {
       color = MaterialTheme.colorScheme.onSurfaceVariant,
       textAlign = TextAlign.Center
     )
-    Spacer(modifier = Modifier.height(16.dp))
+    Spacer(modifier = Modifier.height(24.dp))
     Card(
-      shape = RoundedCornerShape(12.dp),
+      shape = RoundedCornerShape(16.dp),
       colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
       modifier = Modifier.fillMaxWidth()
     ) {
-      Column(modifier = Modifier.padding(14.dp)) {
+      Column(modifier = Modifier.padding(16.dp)) {
         Text(user.fullName, style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold)
         Text(user.email, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-        Text(
-          user.studentNumber ?: user.staffNumber ?: "",
-          style = MaterialTheme.typography.bodySmall,
-          color = MaterialTheme.colorScheme.onSurfaceVariant
-        )
+        val number = user.studentNumber ?: user.staffNumber
+        if (number != null) {
+          Text(number, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
       }
     }
     Spacer(modifier = Modifier.weight(1f))
-    OutlinedButton(onClick = { viewModel.signOut() }, modifier = Modifier.fillMaxWidth().testTag("waiting_sign_out_btn")) {
-      Text(viewModel.t("Sign out", "Toka"))
-    }
+    OutlinedButton(
+      onClick = { viewModel.signOut() },
+      shape = FieldShape,
+      modifier = Modifier.fillMaxWidth().height(52.dp).testTag("waiting_sign_out_btn")
+    ) { Text(viewModel.t("Sign out", "Toka"), fontWeight = FontWeight.SemiBold) }
   }
 }
 
 // ---------- Demo banner ----------
 
+/** A slim, permanent strip so nobody mistakes sample data for real data. */
 @Composable
 fun DemoBanner(viewModel: CampusViewModel) {
   Box(
     modifier = Modifier
       .fillMaxWidth()
       .background(DangerRed)
-      .padding(vertical = 4.dp)
+      .padding(vertical = 3.dp)
       .testTag("demo_banner"),
     contentAlignment = Alignment.Center
   ) {
@@ -566,43 +637,111 @@ fun DemoBanner(viewModel: CampusViewModel) {
   }
 }
 
-// ---------- Small pieces ----------
+// ---------- Building blocks (shared by every page) ----------
+
+@Composable
+private fun AuthHeader(viewModel: CampusViewModel) {
+  Column(modifier = Modifier.fillMaxWidth(), horizontalAlignment = Alignment.CenterHorizontally) {
+    Box(
+      modifier = Modifier.size(64.dp).clip(RoundedCornerShape(20.dp)).background(DeepBlue),
+      contentAlignment = Alignment.Center
+    ) {
+      Icon(Icons.Default.School, contentDescription = "CampusConnect", tint = Color.White, modifier = Modifier.size(34.dp))
+    }
+    Spacer(modifier = Modifier.height(14.dp))
+    Text("CampusConnect", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold)
+    Spacer(modifier = Modifier.height(4.dp))
+    Text(
+      text = viewModel.t(
+        "Your timetable, notices and deadlines in one place.",
+        "Ratiba, matangazo na tarehe za mwisho mahali pamoja."
+      ),
+      style = MaterialTheme.typography.bodyMedium,
+      color = MaterialTheme.colorScheme.onSurfaceVariant,
+      textAlign = TextAlign.Center
+    )
+  }
+}
+
+@Composable
+private fun PageTitle(title: String, subtitle: String) {
+  Text(title, style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
+  Spacer(modifier = Modifier.height(6.dp))
+  Text(subtitle, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+  Spacer(modifier = Modifier.height(20.dp))
+}
+
+@Composable
+private fun PrimaryAction(text: String, enabled: Boolean, tag: String, onClick: () -> Unit) {
+  Button(
+    onClick = onClick,
+    enabled = enabled,
+    shape = FieldShape,
+    colors = ButtonDefaults.buttonColors(containerColor = DeepBlue),
+    modifier = Modifier.fillMaxWidth().height(52.dp).testTag(tag)
+  ) { Text(text, style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold) }
+}
 
 @Composable
 private fun LanguageSwitch(viewModel: CampusViewModel, language: AppLanguage) {
-  Row(
-    modifier = Modifier.fillMaxWidth(),
-    horizontalArrangement = Arrangement.End,
-    verticalAlignment = Alignment.CenterVertically
+  Surface(
+    shape = RoundedCornerShape(20.dp),
+    color = MaterialTheme.colorScheme.surfaceVariant
   ) {
-    ChoiceChip("English", language == AppLanguage.ENGLISH, "lang_en") {
-      if (language != AppLanguage.ENGLISH) viewModel.toggleLanguage()
-    }
-    Spacer(modifier = Modifier.width(6.dp))
-    ChoiceChip("Kiswahili", language == AppLanguage.SWAHILI, "lang_sw") {
-      if (language != AppLanguage.SWAHILI) viewModel.toggleLanguage()
+    Row(modifier = Modifier.padding(3.dp)) {
+      LanguageOption("EN", language == AppLanguage.ENGLISH, "lang_en") {
+        if (language != AppLanguage.ENGLISH) viewModel.toggleLanguage()
+      }
+      LanguageOption("SW", language == AppLanguage.SWAHILI, "lang_sw") {
+        if (language != AppLanguage.SWAHILI) viewModel.toggleLanguage()
+      }
     }
   }
 }
 
 @Composable
-private fun ChoiceChip(label: String, selected: Boolean, tag: String, onClick: () -> Unit) {
-  Surface(
-    shape = RoundedCornerShape(20.dp),
-    color = if (selected) DeepBlue else MaterialTheme.colorScheme.surface,
-    border = BorderStroke(1.dp, if (selected) DeepBlue else MaterialTheme.colorScheme.outline.copy(alpha = 0.4f)),
+private fun LanguageOption(label: String, selected: Boolean, tag: String, onClick: () -> Unit) {
+  Box(
     modifier = Modifier
-      .clip(RoundedCornerShape(20.dp))
+      .clip(RoundedCornerShape(17.dp))
+      .background(if (selected) DeepBlue else Color.Transparent)
       .clickable { onClick() }
-      .testTag(tag)
+      .padding(horizontal = 14.dp, vertical = 6.dp)
+      .testTag(tag),
+    contentAlignment = Alignment.Center
   ) {
     Text(
       text = label,
       style = MaterialTheme.typography.labelMedium,
-      fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal,
-      color = if (selected) Color.White else MaterialTheme.colorScheme.onSurface,
-      modifier = Modifier.padding(horizontal = 14.dp, vertical = 6.dp)
+      fontWeight = FontWeight.Bold,
+      color = if (selected) Color.White else MaterialTheme.colorScheme.onSurfaceVariant
     )
+  }
+}
+
+/** A choice that fills its row: used for Student/Staff and for the programme list. */
+@Composable
+private fun Segment(label: String, selected: Boolean, tag: String, modifier: Modifier, onClick: () -> Unit) {
+  Surface(
+    shape = FieldShape,
+    color = if (selected) DeepBlue.copy(alpha = 0.12f) else MaterialTheme.colorScheme.surface,
+    border = BorderStroke(
+      if (selected) 1.5.dp else 1.dp,
+      if (selected) DeepBlue else MaterialTheme.colorScheme.outline.copy(alpha = 0.5f)
+    ),
+    modifier = modifier
+      .clip(FieldShape)
+      .clickable { onClick() }
+      .testTag(tag)
+  ) {
+    Box(modifier = Modifier.padding(horizontal = 14.dp, vertical = 14.dp), contentAlignment = Alignment.CenterStart) {
+      Text(
+        text = label,
+        style = MaterialTheme.typography.bodyMedium,
+        fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
+        color = if (selected) DeepBlue else MaterialTheme.colorScheme.onSurface
+      )
+    }
   }
 }
 
@@ -612,16 +751,77 @@ private fun AuthField(
   onChange: (String) -> Unit,
   label: String,
   tag: String,
+  icon: ImageVector? = null,
   keyboard: KeyboardType = KeyboardType.Text,
-  isPassword: Boolean = false
+  isPassword: Boolean = false,
+  hint: String? = null,
+  imeAction: ImeAction = ImeAction.Next,
+  onDone: (() -> Unit)? = null
 ) {
+  val focus = LocalFocusManager.current
+  var visible by remember { mutableStateOf(false) }
+
   OutlinedTextField(
     value = value,
     onValueChange = onChange,
     label = { Text(label) },
+    placeholder = if (hint != null) ({ Text(hint) }) else null,
+    leadingIcon = if (icon != null) ({ Icon(icon, contentDescription = null) }) else null,
+    trailingIcon = if (isPassword) {
+      {
+        IconButton(onClick = { visible = !visible }) {
+          Icon(
+            imageVector = if (visible) Icons.Default.VisibilityOff else Icons.Default.Visibility,
+            contentDescription = if (visible) "Hide password" else "Show password"
+          )
+        }
+      }
+    } else null,
     singleLine = true,
-    visualTransformation = if (isPassword) PasswordVisualTransformation() else VisualTransformation.None,
-    keyboardOptions = KeyboardOptions(keyboardType = keyboard),
+    shape = FieldShape,
+    visualTransformation = if (isPassword && !visible) PasswordVisualTransformation() else VisualTransformation.None,
+    keyboardOptions = KeyboardOptions(keyboardType = keyboard, imeAction = imeAction),
+    keyboardActions = KeyboardActions(
+      onNext = { focus.moveFocus(FocusDirection.Down) },
+      onDone = {
+        focus.clearFocus()
+        onDone?.invoke()
+      }
+    ),
+    modifier = Modifier.fillMaxWidth().testTag(tag)
+  )
+}
+
+/** The six-digit code: large, centred, easy to read back from an email. */
+@Composable
+private fun CodeField(value: String, onChange: (String) -> Unit, tag: String, onDone: (() -> Unit)?) {
+  val focus = LocalFocusManager.current
+  OutlinedTextField(
+    value = value,
+    onValueChange = onChange,
+    singleLine = true,
+    shape = FieldShape,
+    textStyle = TextStyle(fontSize = 26.sp, letterSpacing = 8.sp, fontWeight = FontWeight.Bold, textAlign = TextAlign.Center),
+    placeholder = {
+      Text(
+        "000000",
+        modifier = Modifier.fillMaxWidth(),
+        textAlign = TextAlign.Center,
+        style = TextStyle(fontSize = 26.sp, letterSpacing = 8.sp),
+        color = MaterialTheme.colorScheme.outline
+      )
+    },
+    keyboardOptions = KeyboardOptions(
+      keyboardType = KeyboardType.NumberPassword,
+      imeAction = if (onDone != null) ImeAction.Done else ImeAction.Next
+    ),
+    keyboardActions = KeyboardActions(
+      onNext = { focus.moveFocus(FocusDirection.Down) },
+      onDone = {
+        focus.clearFocus()
+        onDone?.invoke()
+      }
+    ),
     modifier = Modifier.fillMaxWidth().testTag(tag)
   )
 }
@@ -634,31 +834,53 @@ private fun ErrorLine(error: String?) {
   }
 }
 
+/** Three-segment strength bar plus the single most useful tip. */
 @Composable
 private fun PasswordHint(viewModel: CampusViewModel, password: String, email: String) {
   if (password.isEmpty()) return
   val check = viewModel.checkPassword(password, email)
-  val (label, color) = when (check.strength) {
-    PasswordStrength.WEAK -> viewModel.t("Weak", "Dhaifu") to DangerRed
-    PasswordStrength.FAIR -> viewModel.t("Fair", "Wastani") to WarmAmber
-    PasswordStrength.STRONG -> viewModel.t("Strong", "Imara") to SuccessGreen
+  val (label, color, level) = when (check.strength) {
+    PasswordStrength.WEAK -> Triple(viewModel.t("Weak", "Dhaifu"), DangerRed, 1)
+    PasswordStrength.FAIR -> Triple(viewModel.t("Fair", "Wastani"), WarmAmber, 2)
+    PasswordStrength.STRONG -> Triple(viewModel.t("Strong", "Imara"), SuccessGreen, 3)
   }
-  Spacer(modifier = Modifier.height(4.dp))
-  Text(label, color = color, style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold)
-  check.problems.forEach {
-    Text("• " + viewModel.passwordProblemText(it), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+  Spacer(modifier = Modifier.height(8.dp))
+  Row(verticalAlignment = Alignment.CenterVertically) {
+    repeat(3) { index ->
+      val fill by animateFloatAsState(if (index < level) 1f else 0f, tween(250), label = "strength_$index")
+      Box(
+        modifier = Modifier
+          .weight(1f)
+          .height(4.dp)
+          .clip(RoundedCornerShape(2.dp))
+          .background(MaterialTheme.colorScheme.surfaceVariant)
+      ) {
+        Box(modifier = Modifier.fillMaxWidth(fill).height(4.dp).background(color))
+      }
+      if (index < 2) Spacer(modifier = Modifier.width(4.dp))
+    }
+    Spacer(modifier = Modifier.width(10.dp))
+    Text(label, color = color, style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold)
+  }
+  check.problems.firstOrNull()?.let {
+    Spacer(modifier = Modifier.height(4.dp))
+    Text(
+      viewModel.passwordProblemText(it),
+      style = MaterialTheme.typography.bodySmall,
+      color = MaterialTheme.colorScheme.onSurfaceVariant
+    )
   }
 }
 
 @Composable
 private fun PrototypeCodeNotice(viewModel: CampusViewModel, code: String) {
-  Surface(shape = RoundedCornerShape(10.dp), color = WarmAmberLight, modifier = Modifier.fillMaxWidth()) {
-    Column(modifier = Modifier.padding(12.dp)) {
+  Surface(shape = RoundedCornerShape(14.dp), color = WarmAmber.copy(alpha = 0.14f), modifier = Modifier.fillMaxWidth()) {
+    Column(modifier = Modifier.padding(14.dp)) {
       Text(
         viewModel.t("Prototype notice", "Taarifa ya mfano"),
         style = MaterialTheme.typography.labelMedium,
         fontWeight = FontWeight.Bold,
-        color = Color(0xFF78350F)
+        color = MaterialTheme.colorScheme.onSurface
       )
       Text(
         viewModel.t(
@@ -666,7 +888,7 @@ private fun PrototypeCodeNotice(viewModel: CampusViewModel, code: String) {
           "Seva ya barua pepe haijaunganishwa bado, kwa hiyo msimbo unaonyeshwa hapa: $code"
         ),
         style = MaterialTheme.typography.bodySmall,
-        color = Color(0xFF78350F),
+        color = MaterialTheme.colorScheme.onSurface,
         modifier = Modifier.testTag("prototype_code")
       )
     }

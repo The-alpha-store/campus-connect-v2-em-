@@ -633,13 +633,15 @@ class CampusRepository {
 
   // Only administrators can read the audit log. Nothing in the app edits or erases an entry.
   val auditLogs: StateFlow<List<AuditLog>> = combine(_auditLogs, currentUser) { list, user ->
-    if (user.role == Role.ADMIN) list else emptyList()
+    if (user.role == Role.ADMIN) list.filter { it.universityId == user.universityId } else emptyList()
   }.stateIn(scope, SharingStarted.Eagerly, emptyList())
 
   // Accounts waiting for the Academic Registry. Only people who proved their email appear here.
-  val pendingUsers: StateFlow<List<UserProfile>> = auth.accounts
-    .map { accounts ->
-      accounts.values.filter { it.profile.status == AccountStatus.PENDING && it.emailVerified }.map { it.profile }
+  // Each university's administrator sees only the people waiting to join that university.
+  val pendingUsers: StateFlow<List<UserProfile>> = combine(auth.accounts, currentUser) { accounts, user ->
+      accounts.values
+        .filter { it.profile.status == AccountStatus.PENDING && it.emailVerified && it.profile.universityId == user.universityId }
+        .map { it.profile }
     }
     .stateIn(scope, SharingStarted.Eagerly, emptyList())
 
@@ -649,8 +651,16 @@ class CampusRepository {
 
   private fun isActive(user: UserProfile) = user.status == AccountStatus.APPROVED
 
+  /** The university a person belongs to. Content belongs to the university of whoever made it. */
+  private fun universityOf(userId: String): String =
+    auth.accounts.value[userId]?.profile?.universityId ?: "cuom"
+
+  /** Everything stays inside one campus: nobody sees another university's data. */
+  private fun sameCampus(ownerId: String, user: UserProfile): Boolean = universityOf(ownerId) == user.universityId
+
   private fun canSeeSession(s: ClassSession, user: UserProfile): Boolean {
     if (!isActive(user)) return false
+    if (!sameCampus(s.lecturerId, user)) return false
     if (user.role == Role.ADMIN) return true
     if (s.lecturerId == user.id) return true
     if (s.approvalStatus != ContentApprovalStatus.APPROVED) return false
@@ -663,6 +673,7 @@ class CampusRepository {
 
   private fun canSeeAnnouncement(a: Announcement, user: UserProfile): Boolean {
     if (!isActive(user)) return false
+    if (!sameCampus(a.authorId, user)) return false
     if (user.role == Role.ADMIN) return true
     if (a.authorId == user.id) return true // authors keep sight of their own, drafts and retracted included
     if (a.approvalStatus != ContentApprovalStatus.APPROVED || a.isRetracted) return false
@@ -670,7 +681,7 @@ class CampusRepository {
       AudienceType.CAMPUS -> true
       AudienceType.PROGRAMME -> when (user.role) {
         Role.STUDENT -> user.programme == a.audienceCode
-        Role.LECTURER -> user.teachesCourses.any { it in SeedUsers.courseCatalog[a.audienceCode].orEmpty() }
+        Role.LECTURER -> user.teachesCourses.any { it in SeedUsers.catalogFor(user.universityId)[a.audienceCode].orEmpty() }
         Role.ADMIN -> true
       }
       AudienceType.COURSE -> when (user.role) {
@@ -683,6 +694,7 @@ class CampusRepository {
 
   private fun canSeeMaterial(m: StudyMaterial, user: UserProfile): Boolean {
     if (!isActive(user)) return false
+    if (!sameCampus(m.uploaderId, user)) return false
     if (user.role == Role.ADMIN) return true
     if (m.uploaderId == user.id) return true
     if (m.approvalStatus != ContentApprovalStatus.APPROVED) return false
@@ -696,6 +708,7 @@ class CampusRepository {
 
   private fun canSeeDeadline(d: DeadlineItem, user: UserProfile): Boolean {
     if (!isActive(user)) return false
+    if (!sameCampus(d.lecturerId, user)) return false
     if (user.role == Role.ADMIN) return true
     if (d.lecturerId == user.id) return true
     if (d.approvalStatus != ContentApprovalStatus.APPROVED) return false
@@ -708,6 +721,7 @@ class CampusRepository {
 
   private fun canSeeSubmission(s: StudentSubmission, user: UserProfile): Boolean {
     if (!isActive(user)) return false
+    if (!sameCampus(s.studentId, user)) return false
     return when (user.role) {
       Role.STUDENT -> s.studentId == user.id // never another student's work
       Role.LECTURER -> baseCourse(s.courseCode) in user.teachesCourses
@@ -718,7 +732,8 @@ class CampusRepository {
   // ---------- Recipients ----------
 
   private fun activeProfiles(): List<UserProfile> =
-    auth.accounts.value.values.map { it.profile }.filter { it.status == AccountStatus.APPROVED }
+    auth.accounts.value.values.map { it.profile }
+      .filter { it.status == AccountStatus.APPROVED && it.universityId == currentUser.value.universityId }
 
   private fun courseStudentIds(courseCode: String): List<String> =
     activeProfiles().filter { it.role == Role.STUDENT && baseCourse(courseCode) in it.enrolledCourses }.map { it.id }
@@ -781,13 +796,14 @@ class CampusRepository {
     }
     return when (user.role) {
       Role.ADMIN -> {
-        val courses = SeedUsers.courseCatalog.values.flatten().distinct().sorted().map { courseOption(it) }
-        val programmes = SeedUsers.programmes.map { AudienceOption(it, AudienceType.PROGRAMME, it, it) }
+        val catalog = SeedUsers.catalogFor(user.universityId)
+        val courses = catalog.values.flatten().distinct().sorted().map { courseOption(it) }
+        val programmes = catalog.keys.map { AudienceOption(it, AudienceType.PROGRAMME, it, it) }
         listOf(AudienceOption("Whole campus", AudienceType.CAMPUS, "Whole campus", "")) + programmes + courses
       }
       Role.LECTURER -> {
         val courses = user.teachesCourses.sorted().map { courseOption(it) }
-        val programmes = SeedUsers.courseCatalog
+        val programmes = SeedUsers.catalogFor(user.universityId)
           .filter { (_, codes) -> codes.any { it in user.teachesCourses } }
           .keys.map { AudienceOption(it, AudienceType.PROGRAMME, it, it) }
         courses + programmes
@@ -1004,7 +1020,7 @@ class CampusRepository {
         return PostError.AUDIENCE_NOT_YOURS
       }
       AudienceType.PROGRAMME -> if (author.role == Role.LECTURER &&
-        author.teachesCourses.none { it in SeedUsers.courseCatalog[audienceCode].orEmpty() }
+        author.teachesCourses.none { it in SeedUsers.catalogFor(author.universityId)[audienceCode].orEmpty() }
       ) {
         recordAudit("POST_BLOCKED", "${author.fullName} tried to post to programme $audienceCode: '$title'")
         return PostError.AUDIENCE_NOT_YOURS
@@ -1296,11 +1312,11 @@ class CampusRepository {
 
   // ---------- Registry: accounts ----------
 
-  fun registryMatches(profile: UserProfile): Boolean = auth.registryMatches(profile)
+  fun registryMatches(profile: UserProfile): Boolean? = auth.registryMatches(profile)
 
   fun approveUser(userId: String, role: Role, programme: String?, teaches: Set<String>) {
     if (!canApproveOrDisapprove()) return
-    val before = pendingUsers.value.find { it.id == userId } ?: return
+    val before = pendingUsers.value.find { it.id == userId } ?: return // pendingUsers is already this campus only
     val updated = auth.approve(userId, role, programme, teaches) ?: return
 
     val roleLabel = role.name.lowercase().replaceFirstChar { it.uppercase() }
@@ -1368,6 +1384,7 @@ class CampusRepository {
     val user = currentUser.value
     val log = AuditLog(
       id = "log-" + UUID.randomUUID().toString().take(6),
+      universityId = user.universityId,
       actor = user.fullName + " (${user.role.name})",
       action = action,
       details = details,

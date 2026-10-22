@@ -27,7 +27,6 @@ import androidx.compose.material.icons.filled.PictureAsPdf
 import androidx.compose.material.icons.filled.ThumbDown
 import androidx.compose.material.icons.filled.ThumbUp
 import androidx.compose.material.icons.filled.Visibility
-import androidx.compose.material.icons.filled.Wifi
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.FloatingActionButton
@@ -96,29 +95,6 @@ fun MaterialsScreen(
             color = MaterialTheme.colorScheme.onSurfaceVariant
           )
         }
-
-        // Wi-Fi only indicator
-        Row(
-          verticalAlignment = Alignment.CenterVertically,
-          modifier = Modifier
-            .clip(RoundedCornerShape(6.dp))
-            .background(MaterialTheme.colorScheme.surfaceVariant)
-            .padding(horizontal = 8.dp, vertical = 4.dp)
-        ) {
-          Icon(
-            imageVector = Icons.Default.Wifi,
-            contentDescription = "Wi-Fi Only",
-            modifier = Modifier.size(14.dp),
-            tint = DeepBlue
-          )
-          Spacer(modifier = Modifier.width(4.dp))
-          Text(
-            text = "Wi-Fi only",
-            style = MaterialTheme.typography.labelSmall,
-            color = DeepBlue,
-            fontWeight = FontWeight.Medium
-          )
-        }
       }
 
       Spacer(modifier = Modifier.height(14.dp))
@@ -128,7 +104,8 @@ fun MaterialsScreen(
         modifier = Modifier.weight(1f),
         verticalArrangement = Arrangement.spacedBy(12.dp)
       ) {
-        items(materials) { mat ->
+        items(materials, key = { it.id }) { mat ->
+          Box(modifier = Modifier.animateItem()) {
           val canModerate = viewModel.canEditOrDelete(mat.uploaderId)
 
           Card(
@@ -309,6 +286,8 @@ fun MaterialsScreen(
                 }
               }
             }
+          }
+        
           }
         }
 

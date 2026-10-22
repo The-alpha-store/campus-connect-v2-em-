@@ -12,8 +12,6 @@ import java.security.SecureRandom
 import java.util.UUID
 
 object AuthConfig {
-  const val UNIVERSITY_EMAIL_DOMAIN = "campus.ac.tz"
-
   /**
    * PROTOTYPE ONLY. There is no mail server yet, so emailed codes are shown on screen.
    * A connected build must set this to false and send the code by email instead.
@@ -29,7 +27,7 @@ enum class CodePurpose { VERIFY_EMAIL, SECOND_STEP, RESET_PASSWORD }
 
 enum class PasswordStrength { WEAK, FAIR, STRONG }
 
-enum class PasswordProblem { TOO_SHORT, COMMON, NEEDS_LETTER_AND_DIGIT, CONTAINS_EMAIL, REPEATED }
+enum class PasswordProblem { TOO_SHORT, COMMON, CONTAINS_EMAIL, REPEATED }
 
 data class PasswordCheck(val strength: PasswordStrength, val problems: List<PasswordProblem>) {
   val acceptable: Boolean get() = problems.isEmpty()
@@ -38,7 +36,8 @@ data class PasswordCheck(val strength: PasswordStrength, val problems: List<Pass
 enum class AuthError {
   NAME_REQUIRED,
   EMAIL_INVALID,
-  EMAIL_NOT_UNIVERSITY,
+  UNIVERSITY_REQUIRED,
+  USE_EMAIL,
   EMAIL_TAKEN,
   NUMBER_INVALID,
   NUMBER_TAKEN,
@@ -135,9 +134,6 @@ class AuthRepository {
     val problems = mutableListOf<PasswordProblem>()
     if (password.length < AuthConfig.MIN_PASSWORD_LENGTH) problems += PasswordProblem.TOO_SHORT
     if (password.lowercase() in commonPasswords) problems += PasswordProblem.COMMON
-    if (!password.any { it.isLetter() } || !password.any { it.isDigit() }) {
-      problems += PasswordProblem.NEEDS_LETTER_AND_DIGIT
-    }
     val local = email.trim().substringBefore('@').lowercase()
     if (local.length >= 3 && password.lowercase().contains(local)) problems += PasswordProblem.CONTAINS_EMAIL
     if (password.isNotEmpty() && password.toSet().size <= 2) problems += PasswordProblem.REPEATED
@@ -156,7 +152,13 @@ class AuthRepository {
 
   // ---------- Sign up ----------
 
+  /**
+   * Sign up. The registration (or staff) number is the person's main identity; the email is only
+   * for codes and password reset, and can be from any provider. Numbers have no required format
+   * because every university writes them differently. Each number is unique inside its university.
+   */
   fun signUp(
+    universityId: String,
     fullName: String,
     email: String,
     idNumber: String,
@@ -165,16 +167,16 @@ class AuthRepository {
     password: String
   ): AuthOutcome {
     val cleanEmail = normalizeEmail(email)
-    val cleanNumber = idNumber.trim().uppercase()
+    val cleanNumber = idNumber.trim().replace(Regex("\\s+"), " ")
 
+    if (SeedUsers.universities.none { it.id == universityId }) return AuthOutcome.Failure(AuthError.UNIVERSITY_REQUIRED)
     if (fullName.trim().length < 3) return AuthOutcome.Failure(AuthError.NAME_REQUIRED)
+    if (cleanNumber.length < 2) return AuthOutcome.Failure(AuthError.NUMBER_INVALID)
     if (!EMAIL_REGEX.matches(cleanEmail)) return AuthOutcome.Failure(AuthError.EMAIL_INVALID)
-    if (!cleanEmail.endsWith("@" + AuthConfig.UNIVERSITY_EMAIL_DOMAIN)) {
-      return AuthOutcome.Failure(AuthError.EMAIL_NOT_UNIVERSITY)
-    }
-    val numberOk = if (isStaff) STAFF_NUMBER_REGEX.matches(cleanNumber) else STUDENT_NUMBER_REGEX.matches(cleanNumber)
-    if (!numberOk) return AuthOutcome.Failure(AuthError.NUMBER_INVALID)
-    if (!isStaff && programmeOrDepartment !in SeedUsers.courseCatalog.keys) {
+
+    // If the university has set up programmes, a student picks one. Otherwise anything goes for now.
+    val known = SeedUsers.programmesFor(universityId)
+    if (!isStaff && known.isNotEmpty() && programmeOrDepartment !in known) {
       return AuthOutcome.Failure(AuthError.PROGRAMME_REQUIRED)
     }
 
@@ -182,22 +184,27 @@ class AuthRepository {
     if (all.any { it.profile.email.equals(cleanEmail, ignoreCase = true) }) {
       return AuthOutcome.Failure(AuthError.EMAIL_TAKEN)
     }
-    if (all.any { (it.profile.studentNumber ?: it.profile.staffNumber) == cleanNumber }) {
+    if (all.any {
+        it.profile.universityId == universityId &&
+          (it.profile.studentNumber ?: it.profile.staffNumber).equals(cleanNumber, ignoreCase = true)
+      }
+    ) {
       return AuthOutcome.Failure(AuthError.NUMBER_TAKEN)
     }
     if (!checkPassword(password, cleanEmail).acceptable) return AuthOutcome.Failure(AuthError.PASSWORD_WEAK)
 
-    // The account always starts as a PENDING student. Nobody can sign up as lecturer or admin:
-    // `requestedRole` is only a hint for the registry.
+    // The account always starts as a PENDING student of the chosen university. Nobody can sign up
+    // as lecturer or admin: `requestedRole` is only a hint for that university's registry.
     val profile = UserProfile(
       id = "usr-" + UUID.randomUUID().toString().take(8),
       fullName = fullName.trim(),
       email = cleanEmail,
       role = Role.STUDENT,
       status = AccountStatus.PENDING,
+      universityId = universityId,
       studentNumber = if (isStaff) null else cleanNumber,
       staffNumber = if (isStaff) cleanNumber else null,
-      programme = programmeOrDepartment.ifBlank { "Unassigned" },
+      programme = programmeOrDepartment.trim().ifBlank { null },
       cohort = if (isStaff) "Staff (awaiting role)" else "Awaiting registry",
       requestedRole = if (isStaff) Role.LECTURER else Role.STUDENT
     )
@@ -210,8 +217,20 @@ class AuthRepository {
 
   // ---------- Sign in ----------
 
-  fun signIn(email: String, password: String): AuthOutcome {
-    val account = findByEmail(email) ?: return AuthOutcome.Failure(AuthError.WRONG_CREDENTIALS)
+  /** [identifier] is a registration/staff number or an email. */
+  fun signIn(identifier: String, password: String): AuthOutcome {
+    val matches = findByIdentifier(identifier)
+    // The same number can exist at two universities. Then the person signs in with their email.
+    if (matches.size > 1) {
+      val withPassword = matches.filter { hash(password, it.salt) == it.passwordHash }
+      if (withPassword.size != 1) return AuthOutcome.Failure(AuthError.USE_EMAIL)
+      return continueSignIn(withPassword.first(), password)
+    }
+    val account = matches.firstOrNull() ?: return AuthOutcome.Failure(AuthError.WRONG_CREDENTIALS)
+    return continueSignIn(account, password)
+  }
+
+  private fun continueSignIn(account: Account, password: String): AuthOutcome {
     if (hash(password, account.salt) != account.passwordHash) {
       return AuthOutcome.Failure(AuthError.WRONG_CREDENTIALS)
     }
@@ -319,7 +338,9 @@ class AuthRepository {
 
   // ---------- Registry actions (permission is checked by the caller) ----------
 
-  fun registryMatches(profile: UserProfile): Boolean {
+  /** True/false when the university has uploaded its list; null when it has not (nothing to check against). */
+  fun registryMatches(profile: UserProfile): Boolean? {
+    if (!SeedUsers.hasRegistryList(profile.universityId)) return null
     return if (profile.requestedRole == Role.LECTURER || (profile.staffNumber != null && profile.studentNumber == null)) {
       profile.staffNumber in SeedUsers.staffList
     } else {
@@ -332,13 +353,14 @@ class AuthRepository {
     val old = account.profile
     val updated = when (role) {
       Role.STUDENT -> {
-        val prog = programme ?: old.programme ?: SeedUsers.programmes.first()
+        val catalog = SeedUsers.catalogFor(old.universityId)
+        val prog = programme ?: old.programme ?: catalog.keys.firstOrNull()
         old.copy(
           role = Role.STUDENT,
           status = AccountStatus.APPROVED,
           programme = prog,
           cohort = if (old.cohort.isNullOrBlank() || old.cohort == "Awaiting registry") "Year 1 • Semester 1" else old.cohort,
-          enrolledCourses = SeedUsers.courseCatalog[prog] ?: emptySet()
+          enrolledCourses = catalog[prog].orEmpty()
         )
       }
       Role.LECTURER -> old.copy(
@@ -421,6 +443,16 @@ class AuthRepository {
     _accounts.value = _accounts.value + (account.profile.id to account)
   }
 
+  private fun findByIdentifier(identifier: String): List<Account> {
+    val clean = identifier.trim()
+    if (clean.isEmpty()) return emptyList()
+    return _accounts.value.values.filter {
+      it.profile.email.equals(clean, ignoreCase = true) ||
+        it.profile.studentNumber.equals(clean, ignoreCase = true) ||
+        it.profile.staffNumber.equals(clean, ignoreCase = true)
+    }
+  }
+
   private fun findByEmail(email: String): Account? {
     val clean = normalizeEmail(email)
     return _accounts.value.values.firstOrNull { it.profile.email.equals(clean, ignoreCase = true) }
@@ -446,8 +478,7 @@ class AuthRepository {
   }
 
   private companion object {
-    val EMAIL_REGEX = Regex("^[a-z0-9._%+-]+@[a-z0-9.-]+\\.[a-z]{2,}$")
-    val STUDENT_NUMBER_REGEX = Regex("^T\\d{2}-\\d{2}-\\d{5}$")
-    val STAFF_NUMBER_REGEX = Regex("^STF-[A-Z]{2,3}-\\d{3}$")
+    // Any address that looks like an address. No domain is required.
+    val EMAIL_REGEX = Regex("^[^@\\s]+@[^@\\s]+\\.[^@\\s]+$")
   }
 }

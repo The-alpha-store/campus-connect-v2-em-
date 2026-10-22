@@ -22,23 +22,30 @@ View your app in AI Studio: https://ai.studio/apps/04efc1b0-c393-407b-99c4-6a509
 7. If you have already published your app in AI Studio, please [request upload key reset](https://support.google.com/googleplay/android-developer/answer/9842756#zippy=%2Crequest-an-upload-key-reset) in Google Play Console.
 
 
-## CampusConnect v2: sign-in, privacy and limits
+## CampusConnect v2: sign-in, universities, privacy and limits
 
-This version follows `CampusConnect_Vision_v2_Login_and_Data_Sharing.md`. See **`docs/BACKEND.md`** for the
-Supabase database (one merged migration, row-level security, per-role limits, tests) and the GitHub Actions setup.
+This version follows `CampusConnect_Vision_v2_Login_and_Data_Sharing.md`, with one change you asked for:
+**any email works, registration numbers have no required format, and you choose your university** when you sign up.
+Each university keeps its own data and has its own administrator.
+See **`docs/BACKEND.md`** for the Supabase database and the GitHub Actions setup.
 
-**Try it (sample accounts, password `Campus#2026`):**
+**Try it (sample accounts, password `Campus#2026`).** Sign in with the registration number or the email:
 
-| Who | Email | Notes |
-|---|---|---|
-| Student | `a.mwangi@campus.ac.tz` | enrolled in the computer science courses |
-| Student | `k.tarimo@campus.ac.tz` | |
-| Waiting room | `b.juma@campus.ac.tz` | pending: sees only "Awaiting approval" |
-| Lecturer | `j.mushi@campus.ac.tz` | teaches CS210, CS215. Needs the second-step code on a new phone |
-| Registry (admin) | `admin.registry@campus.ac.tz` | approves accounts. Needs the second-step code every time |
+| Who | Registration / staff number | Email | Notes |
+|---|---|---|---|
+| Student (Cuom) | `T22-03-08492` | `a.mwangi@campus.ac.tz` | enrolled in the computer science courses |
+| Student (Cuom) | `T22-03-09120` | `k.tarimo@campus.ac.tz` | |
+| Waiting room (Cuom) | `T24-03-01140` | `b.juma@campus.ac.tz` | pending: sees only "Awaiting approval" |
+| Lecturer (Cuom) | `STF-CS-041` | `j.mushi@campus.ac.tz` | needs the second-step code on a new phone |
+| Registry (Cuom) | `STF-ADM-001` | `admin.registry@campus.ac.tz` | approves Cuom accounts. Second-step code every time |
+| Registry (IFM) | `IFM/REG/01` | `ifm.registry@gmail.com` | sees nothing of Cuom |
+| Student (IFM) | `2023/BAC/00123` | `joyce.mapunda@gmail.com` | |
 
-The six-digit codes are shown on screen because this prototype has no mail server. **Open demo** on the
-sign-in screen gives the persona switcher; it only exists in demo mode, under a permanent
-"DEMO: sample data only" banner. Build with `DEMO_MODE_ENABLED = false` (in `app/build.gradle.kts`) to remove it.
+The six-digit codes are shown on screen because this prototype has no mail server. **Open the demo** on the sign-in
+screen gives the persona switcher; it only exists in demo mode, under a permanent "DEMO: sample data only"
+banner. Build with `DEMO_MODE_ENABLED = false` (in `app/build.gradle.kts`) to remove it.
+
+Back goes up one level (dialogs and the viewer close, other tabs return to Home, Home leaves the app).
+Nothing in the app is limited to Wi-Fi.
 
 Run the data-layer tests with `gradle :app:testDebugUnitTest`.

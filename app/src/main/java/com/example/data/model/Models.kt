@@ -59,12 +59,21 @@ data class AttachmentFile(
   val previewText: String? = null
 )
 
+/** A campus that uses the app. Each university has its own people, data and administrators. */
+data class University(
+  val id: String,
+  val name: String,
+  val shortName: String
+)
+
 data class UserProfile(
   val id: String,
   val fullName: String,
   val email: String,
   val role: Role,
   val status: AccountStatus,
+  // Which university this person belongs to. Everything they see and do stays inside it.
+  val universityId: String = "cuom",
   val studentNumber: String? = null,
   val staffNumber: String? = null,
   val programme: String? = null,
@@ -178,6 +187,7 @@ data class NotificationItem(
 
 data class AuditLog(
   val id: String,
+  val universityId: String = "cuom",
   val actor: String,
   val action: String,
   val details: String,

@@ -292,12 +292,15 @@ fun HomeScreen(
 
         // Today's sessions (dayOfWeek == 1 or 2 as sample active day)
         val todaySessions = sessions.filter { it.dayOfWeek == 1 || it.dayOfWeek == 2 }
-        items(todaySessions) { session ->
+        items(todaySessions, key = { it.id }) { session ->
+          Box(modifier = Modifier.animateItem()) {
           SessionCard(
             session = session,
             currentUserRole = user.role,
             is24Hour = is24Hour
           )
+        
+          }
         }
       }
 

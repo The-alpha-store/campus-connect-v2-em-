@@ -7,6 +7,10 @@
 -- The rules live HERE, inside the database. Editing the app or calling the API directly
 -- cannot get around them: "You are not allowed to see that."
 --
+-- Universities are the top-level boundary: every person belongs to ONE university, and nobody sees
+-- or changes another university's people or data. Emails can be from any provider and
+-- registration numbers have no required format, because every campus writes them differently.
+--
 -- Safe to run more than once. Order: types -> tables -> helpers -> triggers -> RPCs ->
 -- views -> grants -> RLS policies -> storage.
 -- =====================================================================================
@@ -37,15 +41,38 @@ exception when duplicate_object then null; end $$;
 
 -- ---------- 1. Reference data -------------------------------------------------------
 
-create table if not exists public.programmes (
+create table if not exists public.universities (
   id   uuid primary key default gen_random_uuid(),
-  name text not null unique
+  code text not null unique check (code ~ '^[A-Z0-9_-]{2,20}$'),   -- e.g. CUOM, IFM, UDSM
+  name text not null
 );
 
-create table if not exists public.courses (
-  code  text primary key check (code ~ '^[A-Z]{2,3}[0-9]{3}$'),
-  title text not null
+create table if not exists public.programmes (
+  id            uuid primary key default gen_random_uuid(),
+  university_id uuid not null references public.universities (id),
+  name          text not null,
+  unique (university_id, name)
 );
+
+-- A course code is made unique across universities by a prefix: 'CUOM:CS210'. The trigger below
+-- builds it from the university and the short code, so apps only ever send the short code.
+create table if not exists public.courses (
+  code          text primary key,
+  university_id uuid not null references public.universities (id),
+  short_code    text not null check (length(trim(short_code)) between 1 and 30),
+  title         text not null
+);
+
+create or replace function public.courses_set_code()
+returns trigger language plpgsql security definer set search_path = public as $$
+begin
+  new.code := (select upper(code) from public.universities where id = new.university_id) || ':' || trim(new.short_code);
+  return new;
+end $$;
+
+drop trigger if exists courses_code on public.courses;
+create trigger courses_code before insert or update of university_id, short_code on public.courses
+  for each row execute function public.courses_set_code();
 
 create table if not exists public.programme_courses (
   programme_id uuid not null references public.programmes (id) on delete cascade,
@@ -55,8 +82,16 @@ create table if not exists public.programme_courses (
 
 -- The university's own lists. Used to flag sign-ups that do not match. Nobody but the
 -- registry (through registry_match) can read them.
-create table if not exists public.university_students (student_number text primary key);
-create table if not exists public.university_staff    (staff_number   text primary key);
+create table if not exists public.university_students (
+  university_id  uuid not null references public.universities (id),
+  student_number text not null,
+  primary key (university_id, student_number)
+);
+create table if not exists public.university_staff (
+  university_id uuid not null references public.universities (id),
+  staff_number  text not null,
+  primary key (university_id, staff_number)
+);
 
 create table if not exists public.app_settings (
   key   text primary key,
@@ -64,7 +99,6 @@ create table if not exists public.app_settings (
 );
 
 insert into public.app_settings (key, value) values
-  ('email_domain', 'campus.ac.tz'),
   ('require_admin_mfa', 'true')
 on conflict (key) do nothing;
 
@@ -73,16 +107,20 @@ on conflict (key) do nothing;
 create table if not exists public.profiles (
   id             uuid primary key references auth.users (id) on delete cascade,
   full_name      text not null check (length(trim(full_name)) >= 3),
-  email          text not null unique,
+  -- Any email provider. Auth already keeps emails unique.
+  email          text not null unique check (email ~ '^[^@[:space:]]+@[^@[:space:]]+\.[^@[:space:]]+$'),
   email_verified boolean not null default false,
   role           public.app_role not null default 'student',
   -- What the person asked for at sign-up. A hint for the registry. It grants nothing.
   requested_role public.app_role not null default 'student'
                    check (requested_role in ('student', 'lecturer')),
   status         public.account_status not null default 'pending',
-  student_number text unique check (student_number is null or student_number ~ '^T[0-9]{2}-[0-9]{2}-[0-9]{5}$'),
-  staff_number   text unique check (staff_number   is null or staff_number   ~ '^STF-[A-Z]{2,3}-[0-9]{3}$'),
+  university_id  uuid not null references public.universities (id),
+  -- Registration and staff numbers have no required format. They are unique inside one university.
+  student_number text check (student_number is null or length(trim(student_number)) >= 2),
+  staff_number   text check (staff_number   is null or length(trim(staff_number))   >= 2),
   programme_id   uuid references public.programmes (id),
+  -- A staff member's department, or a student's programme typed by hand when the university has not set programmes up.
   department     text,
   cohort         text,
   approved_by    uuid references public.profiles (id),
@@ -90,6 +128,12 @@ create table if not exists public.profiles (
   created_at     timestamptz not null default now(),
   check (student_number is not null or staff_number is not null)
 );
+
+create unique index if not exists profiles_student_number_uni
+  on public.profiles (university_id, lower(student_number)) where student_number is not null;
+create unique index if not exists profiles_staff_number_uni
+  on public.profiles (university_id, lower(staff_number)) where staff_number is not null;
+create index if not exists profiles_university_idx on public.profiles (university_id, status);
 
 create table if not exists public.enrollments (
   student_id  uuid not null references public.profiles (id) on delete cascade,
@@ -284,6 +328,7 @@ create index if not exists submissions_course_idx   on public.submissions (cours
 create table if not exists public.audit_log (
   id         bigint generated always as identity primary key,
   at         timestamptz not null default now(),
+  university_id uuid,
   actor_id   uuid,
   actor_name text,
   actor_role text,
@@ -366,6 +411,36 @@ returns boolean language sql stable security definer set search_path = public as
     where t.lecturer_id = auth.uid() and pc.programme_id = p_programme)
 $$;
 
+create or replace function public.my_university()
+returns uuid language sql stable security definer set search_path = public as $$
+  select university_id from public.profiles where id = auth.uid()
+$$;
+
+create or replace function public.university_of(p_user uuid)
+returns uuid language sql stable security definer set search_path = public as $$
+  select university_id from public.profiles where id = p_user
+$$;
+
+-- Is this person at the same university as the signed-in person?
+create or replace function public.same_university(p_user uuid)
+returns boolean language sql stable security definer set search_path = public as $$
+  select p_user is not null
+     and public.university_of(p_user) is not distinct from public.my_university()
+     and public.my_university() is not null
+$$;
+
+-- An administrator, acting on something that belongs to their own university.
+create or replace function public.admin_of(p_owner uuid)
+returns boolean language sql stable security definer set search_path = public as $$
+  select public.is_admin() and public.same_university(p_owner)
+$$;
+
+-- 'CUOM:CS210' -> 'CS210' (what people see)
+create or replace function public.short_code(p_code text)
+returns text language sql immutable as $$
+  select case when position(':' in p_code) > 0 then substr(p_code, position(':' in p_code) + 1) else p_code end
+$$;
+
 -- True only inside our own SECURITY DEFINER functions (they set it for the transaction).
 create or replace function public.is_internal()
 returns boolean language sql stable as $$
@@ -426,8 +501,8 @@ returns void language plpgsql security definer set search_path = public as $$
 declare p public.profiles%rowtype;
 begin
   select * into p from public.profiles where id = auth.uid();
-  insert into public.audit_log (actor_id, actor_name, actor_role, action, details)
-  values (auth.uid(), coalesce(p.full_name, 'system'), coalesce(p.role::text, 'system'), p_action, p_details);
+  insert into public.audit_log (university_id, actor_id, actor_name, actor_role, action, details)
+  values (p.university_id, auth.uid(), coalesce(p.full_name, 'system'), coalesce(p.role::text, 'system'), p_action, p_details);
 end $$;
 
 create or replace function public.audit_log_is_append_only()
@@ -446,10 +521,13 @@ create trigger audit_no_truncate before truncate on public.audit_log
 
 -- ---------- 7. Notifications --------------------------------------------------------
 
-create or replace function public.audience_recipients(p_audience public.audience_type, p_programme uuid, p_course text)
+create or replace function public.audience_recipients(
+  p_audience public.audience_type, p_programme uuid, p_course text, p_university uuid default null)
 returns setof uuid language sql stable security definer set search_path = public as $$
   select p.id from public.profiles p
-  where p.status = 'approved' and (
+  where p.status = 'approved'
+    and p.university_id = coalesce(p_university, public.my_university())
+    and (
         p_audience = 'campus'
      or (p_audience = 'programme' and p.role = 'student' and p.programme_id = p_programme)
      or (p_audience = 'course' and p.role = 'student' and exists (
@@ -470,32 +548,37 @@ returns trigger language plpgsql security definer set search_path = public as $$
 declare
   meta     jsonb := coalesce(new.raw_user_meta_data, '{}'::jsonb);
   v_staff  boolean := coalesce((meta ->> 'is_staff')::boolean, false);
-  v_number text := upper(trim(coalesce(meta ->> 'id_number', '')));
+  v_number text := trim(coalesce(meta ->> 'id_number', ''));
+  v_uni    uuid;
   v_prog   uuid;
+  v_text   text := nullif(trim(coalesce(meta ->> case when coalesce((meta ->> 'is_staff')::boolean, false)
+                                                      then 'department' else 'programme' end, '')), '');
 begin
-  -- University email only. Enforced here, so a modified app cannot get around it.
-  if split_part(lower(new.email), '@', 2) <> public.setting_text('email_domain', 'campus.ac.tz') then
-    raise exception 'university_email_required' using errcode = 'P0001';
+  -- The person chooses their university (by its code). Any email provider is fine.
+  select id into v_uni from public.universities where code = upper(trim(coalesce(meta ->> 'university', '')));
+  if v_uni is null then
+    raise exception 'university_required' using errcode = 'P0001';
   end if;
 
   if not v_staff then
-    select id into v_prog from public.programmes where name = meta ->> 'programme';
+    select id into v_prog from public.programmes where university_id = v_uni and name = v_text;
+    if v_prog is not null then v_text := null; end if;   -- matched a set-up programme: no free text needed
   end if;
 
-  -- Whatever the app sends, a new account is a PENDING STUDENT. Role and status are never
-  -- taken from user-supplied data. Only an administrator can change them (approve_account).
+  -- Whatever the app sends, a new account is a PENDING STUDENT of that university. Role and
+  -- status are never taken from user-supplied data. Only that university's administrator can
+  -- change them (approve_account).
   insert into public.profiles
-    (id, full_name, email, email_verified, role, requested_role, status,
+    (id, university_id, full_name, email, email_verified, role, requested_role, status,
      student_number, staff_number, programme_id, department)
   values
-    (new.id, trim(coalesce(meta ->> 'full_name', '')), lower(new.email),
+    (new.id, v_uni, trim(coalesce(meta ->> 'full_name', '')), lower(new.email),
      new.email_confirmed_at is not null, 'student',
      case when v_staff then 'lecturer'::public.app_role else 'student'::public.app_role end,
      'pending',
      case when v_staff then null else v_number end,
      case when v_staff then v_number else null end,
-     v_prog,
-     case when v_staff then nullif(trim(meta ->> 'department'), '') else null end);
+     v_prog, v_text);
   return new;
 end $$;
 
@@ -525,6 +608,7 @@ begin
     if new.id is distinct from old.id
        or new.email is distinct from old.email
        or new.email_verified is distinct from old.email_verified
+       or new.university_id is distinct from old.university_id
        or new.role is distinct from old.role
        or new.requested_role is distinct from old.requested_role
        or new.status is distinct from old.status
@@ -623,7 +707,7 @@ begin
     format('%s -> %s (%s)', new.title, new.audience, new.priority));
   if new.approval = 'approved' then
     perform public.notify_users(
-      array(select r from public.audience_recipients(new.audience, new.programme_id, new.course_code) r
+      array(select r from public.audience_recipients(new.audience, new.programme_id, new.course_code, public.university_of(new.author_id)) r
             where r <> new.author_id),
       case when new.priority = 'urgent' then 'Urgent: ' || new.title else new.title end,
       'A new notice was published for you.', 'announcement', new.priority = 'urgent');
@@ -718,7 +802,7 @@ begin
       format('%s: %s -> %s. Reason: %s', new.course_code, old.venue, new.venue, coalesce(new.change_reason, '')));
     perform public.notify_users(
       array(select r from public.audience_recipients('course', null, new.course_code) r),
-      case when new.status = 'cancelled' then 'Cancelled: ' || new.course_code else 'Room changed: ' || new.course_code end,
+      case when new.status = 'cancelled' then 'Cancelled: ' || public.short_code(new.course_code) else 'Room changed: ' || public.short_code(new.course_code) end,
       format('%s, %s. Reason: %s', new.venue, to_char(new.start_time, 'HH24:MI'), coalesce(new.change_reason, '')),
       'timetable_change', false);
   end if;
@@ -786,7 +870,7 @@ begin
   perform public.log_audit('MATERIAL_UPLOAD', format('%s for %s (%s)', new.title, new.course_code, new.file_name));
   perform public.notify_users(
     array(select r from public.audience_recipients('course', null, new.course_code) r where r <> new.uploader_id),
-    'New material: ' || new.course_code, new.title, 'announcement', false);
+    'New material: ' || public.short_code(new.course_code), new.title, 'announcement', false);
   return new;
 end $$;
 
@@ -828,18 +912,19 @@ begin
     return old;
   end if;
   if new.course_code is null then
-    v_users := array(select id from public.profiles where status = 'approved' and role = 'student');
+    v_users := array(select id from public.profiles where status = 'approved' and role = 'student'
+                     and university_id = public.university_of(new.lecturer_id));
   else
     v_users := array(select r from public.audience_recipients('course', null, new.course_code) r);
   end if;
   if tg_op = 'INSERT' then
     perform public.log_audit('DEADLINE_CREATED', format('%s due %s', new.title, new.due_at));
-    perform public.notify_users(v_users, 'New deadline: ' || coalesce(new.course_code, 'Academic calendar'),
+    perform public.notify_users(v_users, 'New deadline: ' || coalesce(public.short_code(new.course_code), 'Academic calendar'),
       format('%s, due %s', new.title, to_char(new.due_at at time zone 'Africa/Dar_es_Salaam', 'DD Mon HH24:MI')),
       'deadline_alert', false);
   elsif new.due_at is distinct from old.due_at then
     perform public.log_audit('DEADLINE_EDITED', format('%s moved to %s', new.title, new.due_at));
-    perform public.notify_users(v_users, 'Deadline moved: ' || coalesce(new.course_code, 'Academic calendar'),
+    perform public.notify_users(v_users, 'Deadline moved: ' || coalesce(public.short_code(new.course_code), 'Academic calendar'),
       format('%s is now due %s', new.title, to_char(new.due_at at time zone 'Africa/Dar_es_Salaam', 'DD Mon HH24:MI')),
       'deadline_alert', false);
   end if;
@@ -896,10 +981,10 @@ begin
     perform public.log_audit('WORK_SUBMITTED', format('%s for %s', new.file_name, new.course_code));
     perform public.notify_users(
       array(select lecturer_id from public.teaching_assignments where course_code = new.course_code),
-      'Work submitted: ' || new.course_code, new.file_name, 'submission_received', false);
+      'Work submitted: ' || public.short_code(new.course_code), new.file_name, 'submission_received', false);
   elsif new.grade is distinct from old.grade then
     perform public.log_audit('WORK_GRADED', format('submission %s graded %s', new.id, new.grade));
-    perform public.notify_users(array[new.student_id], 'Assignment graded: ' || new.course_code,
+    perform public.notify_users(array[new.student_id], 'Assignment graded: ' || public.short_code(new.course_code),
       'Your grade is ' || new.grade, 'grade_posted', false);
   end if;
   return new;
@@ -922,7 +1007,9 @@ begin
   if p_role not in ('student', 'lecturer') then raise exception 'cannot_grant_admin_here' using errcode = 'P0001'; end if;
 
   select * into v_user from public.profiles where id = p_user for update;
-  if not found or v_user.status <> 'pending' then raise exception 'not_pending' using errcode = 'P0001'; end if;
+  -- Another university's people are off limits, whatever their status.
+  if not found or not public.same_university(p_user) then raise exception 'not_allowed' using errcode = '42501'; end if;
+  if v_user.status <> 'pending' then raise exception 'not_pending' using errcode = 'P0001'; end if;
   if not v_user.email_verified then raise exception 'email_not_verified' using errcode = 'P0001'; end if;
 
   perform set_config('app.internal', '1', true);
@@ -953,6 +1040,7 @@ create or replace function public.reject_account(p_user uuid)
 returns void language plpgsql security definer set search_path = public as $$
 begin
   if not public.is_admin() then raise exception 'not_allowed' using errcode = '42501'; end if;
+  if not public.same_university(p_user) then raise exception 'not_allowed' using errcode = '42501'; end if;
   perform set_config('app.internal', '1', true);
   update public.profiles set status = 'rejected' where id = p_user and status = 'pending';
   perform set_config('app.internal', '', true);
@@ -965,6 +1053,7 @@ returns void language plpgsql security definer set search_path = public as $$
 begin
   if not public.is_admin() then raise exception 'not_allowed' using errcode = '42501'; end if;
   if p_user = auth.uid() then raise exception 'cannot_suspend_self' using errcode = 'P0001'; end if;
+  if not public.same_university(p_user) then raise exception 'not_allowed' using errcode = '42501'; end if;
   perform set_config('app.internal', '1', true);
   update public.profiles set status = 'suspended' where id = p_user and status in ('approved', 'pending');
   delete from public.devices where user_id = p_user;
@@ -976,26 +1065,33 @@ create or replace function public.set_teaching_assignments(p_lecturer uuid, p_co
 returns void language plpgsql security definer set search_path = public as $$
 begin
   if not public.is_admin() then raise exception 'not_allowed' using errcode = '42501'; end if;
-  if not exists (select 1 from public.profiles where id = p_lecturer and role = 'lecturer') then
+  if not exists (select 1 from public.profiles where id = p_lecturer and role = 'lecturer') or not public.same_university(p_lecturer) then
     raise exception 'not_a_lecturer' using errcode = 'P0001';
   end if;
   delete from public.teaching_assignments where lecturer_id = p_lecturer;
-  insert into public.teaching_assignments (lecturer_id, course_code) select p_lecturer, c from unnest(p_courses) c;
+  insert into public.teaching_assignments (lecturer_id, course_code)
+  select p_lecturer, c.code from public.courses c
+  where c.code = any (p_courses) and c.university_id = public.my_university();
   perform public.log_audit('COURSES_ASSIGNED', format('%s: %s', p_lecturer, array_to_string(p_courses, ', ')));
 end $$;
 
 -- Does the number on the sign-up match the university's list? (green tick / yellow warning)
+-- true/false against this university's list; NULL when it has not uploaded a list yet.
 create or replace function public.registry_match(p_user uuid)
 returns boolean language plpgsql stable security definer set search_path = public as $$
 declare p public.profiles%rowtype;
 begin
-  if not public.is_admin() then raise exception 'not_allowed' using errcode = '42501'; end if;
+  if not public.is_admin() or not public.same_university(p_user) then raise exception 'not_allowed' using errcode = '42501'; end if;
   select * into p from public.profiles where id = p_user;
   if not found then return false; end if;
   if p.staff_number is not null then
-    return exists (select 1 from public.university_staff where staff_number = p.staff_number);
+    if not exists (select 1 from public.university_staff where university_id = p.university_id) then return null; end if;
+    return exists (select 1 from public.university_staff
+                   where university_id = p.university_id and lower(staff_number) = lower(p.staff_number));
   end if;
-  return exists (select 1 from public.university_students where student_number = p.student_number);
+  if not exists (select 1 from public.university_students where university_id = p.university_id) then return null; end if;
+  return exists (select 1 from public.university_students
+                 where university_id = p.university_id and lower(student_number) = lower(p.student_number));
 end $$;
 
 -- "Delivered to 58 - Opened by 41 - 17 not yet opened": only the sender and the registry.
@@ -1005,12 +1101,12 @@ language plpgsql stable security definer set search_path = public as $$
 declare a public.announcements%rowtype;
 begin
   select * into a from public.announcements where id = p_id;
-  if not found or not (public.is_admin() or a.author_id = auth.uid()) then
+  if not found or not (public.admin_of(a.author_id) or a.author_id = auth.uid()) then
     raise exception 'not_allowed' using errcode = '42501';
   end if;
   return query
   select
-    (select count(*)::int from public.audience_recipients(a.audience, a.programme_id, a.course_code) r
+    (select count(*)::int from public.audience_recipients(a.audience, a.programme_id, a.course_code, public.university_of(a.author_id)) r
        join public.profiles p on p.id = r and p.role = 'student'),
     (select count(*)::int from public.announcement_reads ar where ar.announcement_id = p_id);
 end $$;
@@ -1021,13 +1117,13 @@ returns int language plpgsql security definer set search_path = public as $$
 declare a public.announcements%rowtype; v_users uuid[];
 begin
   select * into a from public.announcements where id = p_id for update;
-  if not found or not (public.is_admin() or a.author_id = auth.uid()) then
+  if not found or not (public.admin_of(a.author_id) or a.author_id = auth.uid()) then
     raise exception 'not_allowed' using errcode = '42501';
   end if;
   if a.retracted_at is not null or a.reminded_at is not null then return 0; end if;
 
   v_users := array(
-    select r from public.audience_recipients(a.audience, a.programme_id, a.course_code) r
+    select r from public.audience_recipients(a.audience, a.programme_id, a.course_code, public.university_of(a.author_id)) r
     where r <> a.author_id
       and not exists (select 1 from public.announcement_reads ar where ar.announcement_id = p_id and ar.user_id = r));
 
@@ -1046,7 +1142,7 @@ returns boolean language plpgsql security definer set search_path = public as $$
 declare a public.announcements%rowtype;
 begin
   select * into a from public.announcements where id = p_id for update;
-  if not found or not (public.is_admin() or a.author_id = auth.uid()) then
+  if not found or not (public.admin_of(a.author_id) or a.author_id = auth.uid()) then
     raise exception 'not_allowed' using errcode = '42501';
   end if;
   if a.retracted_at is not null then return false; end if;
@@ -1056,7 +1152,7 @@ begin
   perform set_config('app.internal', '', true);
 
   perform public.notify_users(
-    array(select r from public.audience_recipients(a.audience, a.programme_id, a.course_code) r where r <> a.author_id),
+    array(select r from public.audience_recipients(a.audience, a.programme_id, a.course_code, public.university_of(a.author_id)) r where r <> a.author_id),
     'Correction: notice withdrawn', format('"%s" was withdrawn. Please disregard it.', a.title), 'announcement', false);
   perform public.log_audit('ANNOUNCEMENT_RETRACTED', a.title);
   return true;
@@ -1068,7 +1164,7 @@ returns int language plpgsql stable security definer set search_path = public as
 declare d public.deadlines%rowtype;
 begin
   select * into d from public.deadlines where id = p_id;
-  if not found or not (public.is_admin() or d.lecturer_id = auth.uid()) then
+  if not found or not (public.admin_of(d.lecturer_id) or d.lecturer_id = auth.uid()) then
     raise exception 'not_allowed' using errcode = '42501';
   end if;
   return (select count(*)::int from public.deadline_done where deadline_id = p_id);
@@ -1146,7 +1242,8 @@ begin
   insert into public.data_deletion_requests (user_id) values (auth.uid()) on conflict do nothing;
   perform public.log_audit('DATA_DELETION_REQUESTED', 'Person asked for their data to be deleted');
   perform public.notify_users(
-    array(select id from public.profiles where role = 'admin' and status = 'approved'),
+    array(select id from public.profiles where role = 'admin' and status = 'approved'
+          and university_id = public.my_university()),
     'Data deletion request', 'A person asked for their personal data to be deleted.', 'approval', false);
 end $$;
 
@@ -1154,15 +1251,17 @@ end $$;
 -- or the service role. Run it once, then enrol that person in two-step sign-in.
 create or replace function public.bootstrap_first_admin(p_email text, p_staff_number text)
 returns void language plpgsql security definer set search_path = public as $$
+declare v_uni uuid;
 begin
-  if exists (select 1 from public.profiles where role = 'admin') then
-    raise exception 'an administrator already exists' using errcode = 'P0001';
+  select university_id into v_uni from public.profiles where lower(email) = lower(p_email) and email_verified;
+  if v_uni is null then raise exception 'no verified account with that email' using errcode = 'P0001'; end if;
+  if exists (select 1 from public.profiles where role = 'admin' and university_id = v_uni) then
+    raise exception 'this university already has an administrator' using errcode = 'P0001';
   end if;
   perform set_config('app.internal', '1', true);
-  update public.profiles set role = 'admin', status = 'approved', staff_number = upper(p_staff_number),
+  update public.profiles set role = 'admin', status = 'approved', staff_number = trim(p_staff_number),
     student_number = null, approved_at = now()
   where lower(email) = lower(p_email) and email_verified;
-  if not found then raise exception 'no verified account with that email' using errcode = 'P0001'; end if;
   perform set_config('app.internal', '', true);
 end $$;
 
@@ -1171,14 +1270,15 @@ end $$;
 -- Everyone active may see the names of lecturers and administrators, and nothing more.
 create or replace view public.staff_directory as
   select id, full_name, role from public.profiles
-  where status = 'approved' and role in ('lecturer', 'admin') and public.is_active();
+  where status = 'approved' and role in ('lecturer', 'admin') and public.is_active()
+    and university_id = public.my_university();
 
 -- A lecturer's class list: names and registration numbers for their own courses only.
 create or replace view public.class_list as
   select e.course_code, p.id as student_id, p.full_name, p.student_number
   from public.enrollments e
   join public.profiles p on p.id = e.student_id and p.status = 'approved'
-  where public.is_admin() or public.teaches(e.course_code);
+  where public.admin_of(p.id) or public.teaches(e.course_code);
 
 -- ---------- 14. Privileges -----------------------------------------------------------
 -- Start from nothing, then give each table only what it needs. RLS then narrows the rows.
@@ -1192,7 +1292,8 @@ alter default privileges in schema public revoke all on functions from public, a
 -- Policy helpers must be callable by anyone who can be asked a policy question.
 grant execute on function
   public.setting_text(text, text), public.is_active(), public.is_student(), public.is_lecturer(),
-  public.is_admin(), public.teaches(text), public.enrolled_in(text), public.in_programme(uuid),
+  public.is_admin(), public.my_university(), public.university_of(uuid), public.same_university(uuid),
+  public.admin_of(uuid), public.teaches(text), public.enrolled_in(text), public.in_programme(uuid),
   public.teaches_programme(uuid), public.is_internal(), public.today_start()
   to anon, authenticated;
 
@@ -1213,7 +1314,7 @@ grant execute on function
   public.request_data_deletion()
   to authenticated;
 
-grant select on public.programmes, public.courses, public.programme_courses to anon, authenticated;
+grant select on public.universities, public.programmes, public.courses, public.programme_courses to anon, authenticated;
 grant select on public.role_limits to authenticated;
 grant select on public.staff_directory, public.class_list to authenticated;
 
@@ -1252,6 +1353,7 @@ grant select on public.data_deletion_requests to authenticated;
 
 -- ---------- 15. Row-level security ---------------------------------------------------
 
+alter table public.universities            enable row level security;
 alter table public.programmes              enable row level security;
 alter table public.courses                 enable row level security;
 alter table public.programme_courses       enable row level security;
@@ -1287,6 +1389,7 @@ begin
 end $$;
 
 -- Reference data: readable by anyone (the sign-up screen needs the programme list).
+create policy cc_universities_read on public.universities       for select to anon, authenticated using (true);
 create policy cc_programmes_read on public.programmes         for select to anon, authenticated using (true);
 create policy cc_courses_read    on public.courses            for select to anon, authenticated using (true);
 create policy cc_pc_read         on public.programme_courses  for select to anon, authenticated using (true);
@@ -1294,35 +1397,35 @@ create policy cc_limits_read     on public.role_limits        for select to auth
 
 -- Profiles: your own, or all of them for the registry. Never another student's.
 create policy cc_profiles_read   on public.profiles for select to authenticated
-  using (id = auth.uid() or public.is_admin());
+  using (id = auth.uid() or (public.is_admin() and university_id = public.my_university()));
 create policy cc_profiles_update on public.profiles for update to authenticated
   using (id = auth.uid()) with check (id = auth.uid());
 
 create policy cc_enroll_read on public.enrollments for select to authenticated
-  using (student_id = auth.uid() or public.is_admin());
+  using (student_id = auth.uid() or public.admin_of(student_id));
 create policy cc_teach_read  on public.teaching_assignments for select to authenticated
-  using (lecturer_id = auth.uid() or public.is_admin());
+  using (lecturer_id = auth.uid() or public.admin_of(lecturer_id));
 
 -- Timetable: enrolled students, the lecturer who teaches it, the registry.
 create policy cc_sessions_read on public.class_sessions for select to authenticated
-  using (public.is_admin() or lecturer_id = auth.uid()
+  using (public.admin_of(lecturer_id) or lecturer_id = auth.uid()
          or (public.is_active() and approval = 'approved'
              and (public.enrolled_in(course_code) or public.teaches(course_code))));
 create policy cc_sessions_insert on public.class_sessions for insert to authenticated
-  with check (public.is_admin() or (lecturer_id = auth.uid() and public.teaches(course_code)));
+  with check (public.admin_of(lecturer_id) or (lecturer_id = auth.uid() and public.teaches(course_code)));
 create policy cc_sessions_update on public.class_sessions for update to authenticated
-  using (public.is_admin() or (lecturer_id = auth.uid() and public.teaches(course_code)))
-  with check (public.is_admin() or (lecturer_id = auth.uid() and public.teaches(course_code)));
+  using (public.admin_of(lecturer_id) or (lecturer_id = auth.uid() and public.teaches(course_code)))
+  with check (public.admin_of(lecturer_id) or (lecturer_id = auth.uid() and public.teaches(course_code)));
 create policy cc_sessions_delete on public.class_sessions for delete to authenticated
-  using (public.is_admin() or (lecturer_id = auth.uid() and public.teaches(course_code)));
+  using (public.admin_of(lecturer_id) or (lecturer_id = auth.uid() and public.teaches(course_code)));
 
 -- Announcements: published ones for your audiences; authors keep their own, drafts included.
 create policy cc_ann_read on public.announcements for select to authenticated
   using (
-    public.is_admin()
+    public.admin_of(author_id)
     or author_id = auth.uid()
     or (public.is_active() and approval = 'approved' and retracted_at is null and (
-          audience = 'campus'
+          (audience = 'campus' and public.same_university(author_id))
        or (audience = 'programme' and (public.in_programme(programme_id) or public.teaches_programme(programme_id)))
        or (audience = 'course'    and (public.enrolled_in(course_code) or public.teaches(course_code)))))
   );
@@ -1331,16 +1434,16 @@ create policy cc_ann_insert on public.announcements for insert to authenticated
   with check (
     author_id = auth.uid()
     and approval in ('draft', 'approved')
-    and (public.is_admin()
+    and (public.admin_of(author_id)
          or (public.is_lecturer() and (
                (audience = 'course'    and public.teaches(course_code))
             or (audience = 'programme' and public.teaches_programme(programme_id)))))
   );
 create policy cc_ann_update on public.announcements for update to authenticated
-  using (public.is_admin() or author_id = auth.uid())
-  with check (public.is_admin() or author_id = auth.uid());
+  using (public.admin_of(author_id) or author_id = auth.uid())
+  with check (public.admin_of(author_id) or author_id = auth.uid());
 create policy cc_ann_delete on public.announcements for delete to authenticated
-  using (public.is_admin() or author_id = auth.uid());
+  using (public.admin_of(author_id) or author_id = auth.uid());
 
 -- Read receipts: you can see and write only your own, and only for notices you can see.
 create policy cc_reads_read on public.announcement_reads for select to authenticated
@@ -1351,30 +1454,30 @@ create policy cc_reads_insert on public.announcement_reads for insert to authent
 
 -- Study materials.
 create policy cc_mat_read on public.study_materials for select to authenticated
-  using (public.is_admin() or uploader_id = auth.uid()
+  using (public.admin_of(uploader_id) or uploader_id = auth.uid()
          or (public.is_active() and approval = 'approved'
              and (public.enrolled_in(course_code) or public.teaches(course_code))));
 create policy cc_mat_insert on public.study_materials for insert to authenticated
-  with check (uploader_id = auth.uid() and (public.is_admin() or (public.is_lecturer() and public.teaches(course_code))));
+  with check (uploader_id = auth.uid() and (public.admin_of(uploader_id) or (public.is_lecturer() and public.teaches(course_code))));
 create policy cc_mat_update on public.study_materials for update to authenticated
-  using (public.is_admin() or uploader_id = auth.uid())
-  with check (public.is_admin() or uploader_id = auth.uid());
+  using (public.admin_of(uploader_id) or uploader_id = auth.uid())
+  with check (public.admin_of(uploader_id) or uploader_id = auth.uid());
 create policy cc_mat_delete on public.study_materials for delete to authenticated
-  using (public.is_admin() or uploader_id = auth.uid());
+  using (public.admin_of(uploader_id) or uploader_id = auth.uid());
 
 -- Deadlines. course_code NULL = registry calendar entry, visible to every active person.
 create policy cc_dl_read on public.deadlines for select to authenticated
-  using (public.is_admin() or lecturer_id = auth.uid()
+  using (public.admin_of(lecturer_id) or lecturer_id = auth.uid()
          or (public.is_active() and approval = 'approved'
-             and (course_code is null or public.enrolled_in(course_code) or public.teaches(course_code))));
+             and ((course_code is null and public.same_university(lecturer_id)) or public.enrolled_in(course_code) or public.teaches(course_code))));
 create policy cc_dl_insert on public.deadlines for insert to authenticated
   with check (lecturer_id = auth.uid()
-              and (public.is_admin() or (public.is_lecturer() and course_code is not null and public.teaches(course_code))));
+              and (public.admin_of(lecturer_id) or (public.is_lecturer() and course_code is not null and public.teaches(course_code))));
 create policy cc_dl_update on public.deadlines for update to authenticated
-  using (public.is_admin() or lecturer_id = auth.uid())
-  with check (public.is_admin() or lecturer_id = auth.uid());
+  using (public.admin_of(lecturer_id) or lecturer_id = auth.uid())
+  with check (public.admin_of(lecturer_id) or lecturer_id = auth.uid());
 create policy cc_dl_delete on public.deadlines for delete to authenticated
-  using (public.is_admin() or lecturer_id = auth.uid());
+  using (public.admin_of(lecturer_id) or lecturer_id = auth.uid());
 
 -- Done ticks: strictly the student's own. There is deliberately no lecturer or admin policy.
 create policy cc_done_read on public.deadline_done for select to authenticated
@@ -1387,17 +1490,17 @@ create policy cc_done_delete on public.deadline_done for delete to authenticated
 
 -- Submissions: a student sees only their own work; a lecturer, work for courses they teach.
 create policy cc_sub_read on public.submissions for select to authenticated
-  using (student_id = auth.uid() or public.is_admin()
+  using (student_id = auth.uid() or public.admin_of(student_id)
          or (public.is_lecturer() and public.teaches(course_code)));
 create policy cc_sub_insert on public.submissions for insert to authenticated
   with check (student_id = auth.uid() and public.enrolled_in(course_code)
               and exists (select 1 from public.deadlines d
                           where d.id = submissions.deadline_id and d.course_code = submissions.course_code));
 create policy cc_sub_update on public.submissions for update to authenticated
-  using (public.is_admin() or (public.is_lecturer() and public.teaches(course_code)))
-  with check (public.is_admin() or (public.is_lecturer() and public.teaches(course_code)));
+  using (public.admin_of(student_id) or (public.is_lecturer() and public.teaches(course_code)))
+  with check (public.admin_of(student_id) or (public.is_lecturer() and public.teaches(course_code)));
 create policy cc_sub_delete on public.submissions for delete to authenticated
-  using (public.is_admin() or (student_id = auth.uid() and status = 'pending_review'));
+  using (public.admin_of(student_id) or (student_id = auth.uid() and status = 'pending_review'));
 
 -- Notifications: only your own, for everyone, administrators included.
 create policy cc_notif_read   on public.notifications for select to authenticated using (user_id = auth.uid());
@@ -1406,13 +1509,14 @@ create policy cc_notif_update on public.notifications for update to authenticate
 create policy cc_notif_delete on public.notifications for delete to authenticated using (user_id = auth.uid());
 
 -- Audit log: administrators read it. Nobody writes it directly, and nobody can change it.
-create policy cc_audit_read on public.audit_log for select to authenticated using (public.is_admin());
+create policy cc_audit_read on public.audit_log for select to authenticated
+  using (public.is_admin() and university_id = public.my_university());
 
 create policy cc_dev_read   on public.devices for select to authenticated using (user_id = auth.uid());
 create policy cc_dev_delete on public.devices for delete to authenticated using (user_id = auth.uid());
 
 create policy cc_del_read on public.data_deletion_requests for select to authenticated
-  using (user_id = auth.uid() or public.is_admin());
+  using (user_id = auth.uid() or public.admin_of(user_id));
 
 -- ---------- 16. Storage ---------------------------------------------------------------
 -- Folder conventions (the folder decides who may write):
@@ -1455,7 +1559,8 @@ create policy cc_mat_obj_insert on storage.objects for insert to authenticated
               and (public.is_admin() or (public.is_lecturer() and public.teaches((storage.foldername(name))[1]))));
 create policy cc_mat_obj_delete on storage.objects for delete to authenticated
   using (bucket_id = 'materials'
-         and (public.is_admin() or (storage.foldername(name))[2] = auth.uid()::text));
+         and ((storage.foldername(name))[2] = auth.uid()::text
+              or (public.is_admin() and exists (select 1 from public.study_materials m where m.storage_path = objects.name))));
 
 create policy cc_sub_obj_read on storage.objects for select to authenticated
   using (bucket_id = 'submissions' and (
@@ -1466,7 +1571,8 @@ create policy cc_sub_obj_insert on storage.objects for insert to authenticated
               and (storage.foldername(name))[1] = auth.uid()::text);
 create policy cc_sub_obj_delete on storage.objects for delete to authenticated
   using (bucket_id = 'submissions'
-         and (public.is_admin() or (storage.foldername(name))[1] = auth.uid()::text));
+         and ((storage.foldername(name))[1] = auth.uid()::text
+              or (public.is_admin() and exists (select 1 from public.submissions s where s.storage_path = objects.name))));
 
 create policy cc_ann_obj_read on storage.objects for select to authenticated
   using (bucket_id = 'announcements' and (
@@ -1478,4 +1584,5 @@ create policy cc_ann_obj_insert on storage.objects for insert to authenticated
               and (storage.foldername(name))[1] = auth.uid()::text);
 create policy cc_ann_obj_delete on storage.objects for delete to authenticated
   using (bucket_id = 'announcements'
-         and (public.is_admin() or (storage.foldername(name))[1] = auth.uid()::text));
+         and ((storage.foldername(name))[1] = auth.uid()::text
+              or (public.is_admin() and exists (select 1 from public.announcements a where a.attachment_path = objects.name))));

@@ -141,8 +141,11 @@ fun NotificationsScreen(
         modifier = Modifier.weight(1f),
         verticalArrangement = Arrangement.spacedBy(10.dp)
       ) {
-        items(notifications) { notif ->
+        items(notifications, key = { it.id }) { notif ->
+          Box(modifier = Modifier.animateItem()) {
           NotificationCard(item = notif)
+        
+          }
         }
 
         item {

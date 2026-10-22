@@ -2,6 +2,7 @@ package com.example.data.repository
 
 import com.example.data.model.AccountStatus
 import com.example.data.model.Role
+import com.example.data.model.University
 import com.example.data.model.UserProfile
 
 /**
@@ -12,11 +13,33 @@ import com.example.data.model.UserProfile
  */
 object SeedUsers {
 
-  /** Programme -> base course codes. Used to enrol a student when the registry approves them. */
-  val courseCatalog: Map<String, Set<String>> = mapOf(
-    "BSc Computer Science" to setOf("CS210", "MT101", "CS212", "IS202", "CS215", "GS101"),
-    "BSc Information Systems" to setOf("IS202", "MT101", "GS101")
+  /** Campuses that can be chosen at sign-up. More are added as they join. */
+  val universities: List<University> = listOf(
+    University("cuom", "Cuom", "CUoM"),
+    University("ifm", "Institute of Finance Management", "IFM"),
+    University("udsm", "University of Dar es Salaam", "UDSM")
   )
+
+  fun universityName(id: String): String = universities.firstOrNull { it.id == id }?.name ?: id
+
+  /**
+   * Programme -> base course codes, per university. A university that has not set up its
+   * programmes yet simply has an empty catalogue: its students sign up with a free-text programme
+   * and their administrator assigns courses later.
+   */
+  private val catalogs: Map<String, Map<String, Set<String>>> = mapOf(
+    "cuom" to mapOf(
+      "BSc Computer Science" to setOf("CS210", "MT101", "CS212", "IS202", "CS215", "GS101"),
+      "BSc Information Systems" to setOf("IS202", "MT101", "GS101")
+    )
+  )
+
+  fun catalogFor(universityId: String): Map<String, Set<String>> = catalogs[universityId].orEmpty()
+
+  fun programmesFor(universityId: String): List<String> = catalogFor(universityId).keys.toList()
+
+  /** Cuom's catalogue, used by the sample people below. */
+  val courseCatalog: Map<String, Set<String>> = catalogFor("cuom")
 
   val programmes: List<String> = courseCatalog.keys.toList()
 
@@ -171,14 +194,40 @@ object SeedUsers {
     requestedRole = Role.LECTURER
   )
 
+  // A second campus, to show that universities are kept apart. Their numbers and emails are free-form.
+  val ifmRegistry = UserProfile(
+    id = "usr-ifm-adm",
+    fullName = "Rehema Salum (IFM Registry)",
+    email = "ifm.registry@gmail.com",
+    role = Role.ADMIN,
+    status = AccountStatus.APPROVED,
+    universityId = "ifm",
+    staffNumber = "IFM/REG/01",
+    programme = "Registry",
+    cohort = "Registrar",
+    requestedRole = Role.ADMIN
+  )
+
+  val ifmStudent = UserProfile(
+    id = "usr-ifm-stu",
+    fullName = "Joyce Mapunda",
+    email = "joyce.mapunda@gmail.com",
+    role = Role.STUDENT,
+    status = AccountStatus.APPROVED,
+    universityId = "ifm",
+    studentNumber = "2023/BAC/00123",
+    programme = "Bachelor of Accounting",
+    cohort = "Year 2"
+  )
+
   /** Everyone the prototype knows about. */
   val directory: List<UserProfile> =
-    listOf(asha, kelvin, mushi, grace, bakari, kweka, ndosi, emanuel, sarah, baraka, neema, minja)
+    listOf(asha, kelvin, mushi, grace, bakari, kweka, ndosi, emanuel, sarah, baraka, neema, minja, ifmRegistry, ifmStudent)
 
   /** The three people shown in demo mode. */
   val demoPersonas: List<UserProfile> = listOf(asha, mushi, emanuel)
 
-  /** University student list: used to flag registration numbers that do not match. */
+  /** Cuom's student list: used to flag registration numbers that do not match. Other campuses add theirs later. */
   val studentList: Set<String> = setOf(
     "T22-03-08492", "T22-03-09120", "T24-03-01140", "T23-03-09412", "T23-03-00007", "T24-03-00311"
   )
@@ -188,6 +237,9 @@ object SeedUsers {
     "STF-CS-041", "STF-MT-019", "STF-CS-052", "STF-IS-033", "STF-GS-012",
     "STF-ADM-001", "STF-ADM-008", "STF-EE-078"
   )
+
+  /** Only Cuom has uploaded its student and staff lists so far. */
+  fun hasRegistryList(universityId: String): Boolean = universityId == "cuom"
 
   /** Password given to the sample accounts so the sign-in flow can be tried end to end. */
   const val SAMPLE_PASSWORD = "Campus#2026"

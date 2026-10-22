@@ -37,6 +37,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -140,44 +141,59 @@ fun TimetableScreen(
 
     // Day Strip (only active if not in full week view)
     if (!isWeekView) {
-      LazyRow(
+      val today = remember { viewModel.todayDay() }
+      Row(
         modifier = Modifier.fillMaxWidth(),
-        horizontalArrangement = Arrangement.spacedBy(8.dp)
+        horizontalArrangement = Arrangement.spacedBy(6.dp)
       ) {
-        items(days) { (dayNum, dayLabel) ->
+        days.forEach { (dayNum, dayLabel) ->
           val isSelected = selectedDay == dayNum
-          val hasSessions = sessions.any { it.dayOfWeek == dayNum }
+          val isToday = today == dayNum
+          val count = sessions.count { it.dayOfWeek == dayNum }
           val hasChanges = sessions.any { it.dayOfWeek == dayNum && it.status == SessionStatus.CHANGED }
 
           Box(
             modifier = Modifier
-              .clip(RoundedCornerShape(12.dp))
+              .weight(1f)
+              .clip(RoundedCornerShape(14.dp))
               .background(if (isSelected) DeepBlue else MaterialTheme.colorScheme.surface)
               .border(
-                width = 1.dp,
-                color = if (isSelected) DeepBlue else MaterialTheme.colorScheme.outline.copy(alpha = 0.3f),
-                shape = RoundedCornerShape(12.dp)
+                width = if (isToday && !isSelected) 1.5.dp else 1.dp,
+                color = when {
+                  isSelected -> DeepBlue
+                  isToday -> DeepBlue
+                  else -> MaterialTheme.colorScheme.outline.copy(alpha = 0.3f)
+                },
+                shape = RoundedCornerShape(14.dp)
               )
               .clickable { viewModel.setSelectedDay(dayNum) }
-              .padding(horizontal = 16.dp, vertical = 10.dp)
+              .padding(vertical = 10.dp)
               .testTag("day_strip_$dayLabel"),
             contentAlignment = Alignment.Center
           ) {
             Column(horizontalAlignment = Alignment.CenterHorizontally) {
               Text(
                 text = dayLabel,
-                style = MaterialTheme.typography.labelMedium,
+                style = MaterialTheme.typography.labelLarge,
                 fontWeight = FontWeight.Bold,
                 color = if (isSelected) Color.White else MaterialTheme.colorScheme.onSurface
               )
-              if (hasChanges) {
-                Box(
-                  modifier = Modifier
-                    .padding(top = 4.dp)
-                    .size(6.dp)
-                    .clip(RoundedCornerShape(3.dp))
-                    .background(if (isSelected) WarmAmberLight else WarmAmber)
+              Spacer(modifier = Modifier.height(3.dp))
+              Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                  text = if (count > 0) "$count" else "\u2013",
+                  style = MaterialTheme.typography.labelSmall,
+                  color = if (isSelected) Color.White.copy(alpha = 0.85f) else MaterialTheme.colorScheme.onSurfaceVariant
                 )
+                if (hasChanges) {
+                  Spacer(modifier = Modifier.width(3.dp))
+                  Box(
+                    modifier = Modifier
+                      .size(6.dp)
+                      .clip(RoundedCornerShape(3.dp))
+                      .background(if (isSelected) WarmAmberLight else WarmAmber)
+                  )
+                }
               }
             }
           }
@@ -219,7 +235,8 @@ fun TimetableScreen(
         modifier = Modifier.weight(1f),
         verticalArrangement = Arrangement.spacedBy(12.dp)
       ) {
-        items(filteredSessions) { session ->
+        items(filteredSessions, key = { it.id }) { session ->
+          Box(modifier = Modifier.animateItem()) {
           SessionCard(
             session = session,
             currentUserRole = user.role,
@@ -229,6 +246,8 @@ fun TimetableScreen(
             onCancelClick = { onOpenCancelDialog(session.id) },
             onDeleteClick = if (viewModel.canEditOrDelete(session.lecturerId)) { { viewModel.deleteSession(session.id) } } else null
           )
+        
+          }
         }
 
         item {

@@ -1,5 +1,8 @@
 package com.example.ui
 
+import androidx.activity.compose.BackHandler
+import androidx.compose.animation.Crossfade
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -131,6 +134,10 @@ fun CampusMainApp(viewModel: CampusViewModel) {
   }
   val remindedIds by viewModel.remindedAnnouncements.collectAsState()
   val currentTab by viewModel.currentTab.collectAsState()
+
+  // Back goes up one level instead of leaving the app: open dialogs and the viewer close on their
+  // own, then any other tab returns to Home, and only Home lets the phone close the app.
+  BackHandler(enabled = currentTab != ScreenTab.HOME) { viewModel.setTab(ScreenTab.HOME) }
   val currentUser by viewModel.currentUser.collectAsState()
   val isOffline by viewModel.isOffline.collectAsState()
   val unreadNotifs by viewModel.unreadNotificationsCount.collectAsState()
@@ -360,7 +367,8 @@ fun CampusMainApp(viewModel: CampusViewModel) {
           .weight(1f)
           .fillMaxWidth()
       ) {
-        when (currentTab) {
+        Crossfade(targetState = currentTab, animationSpec = tween(180), label = "tab_change") { tab ->
+        when (tab) {
           ScreenTab.HOME -> HomeScreen(
             viewModel = viewModel,
             onNavigateToNotifications = { viewModel.setTab(ScreenTab.NOTIFICATIONS) },
@@ -414,6 +422,7 @@ fun CampusMainApp(viewModel: CampusViewModel) {
           ScreenTab.NOTIFICATIONS -> NotificationsScreen(
             viewModel = viewModel
           )
+        }
         }
       }
       }

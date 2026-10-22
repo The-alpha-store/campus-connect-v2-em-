@@ -18,6 +18,7 @@ import com.example.data.model.UserProfile
 import com.example.data.repository.AudienceOption
 import com.example.data.repository.CampusRepository
 import com.example.data.repository.PostError
+import com.example.data.repository.SeedUsers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -48,6 +49,10 @@ class CampusViewModel(
   val visibleCode = repository.auth.visibleCode
   val demoPersonas: List<UserProfile> = repository.demoPersonas
 
+  /** Campuses offered at sign-up, and the programmes each has set up (may be none yet). */
+  val universities = SeedUsers.universities
+  fun programmesFor(universityId: String): List<String> = SeedUsers.programmesFor(universityId)
+
   val currentUser = repository.currentUser
   val appLanguage = repository.appLanguage
   val isOffline = repository.isOffline
@@ -76,7 +81,7 @@ class CampusViewModel(
   val currentTab: StateFlow<ScreenTab> = _currentTab.asStateFlow()
 
   // Timetable State
-  private val _selectedDay = MutableStateFlow(1)
+  private val _selectedDay = MutableStateFlow(todayDay())
   val selectedDay: StateFlow<Int> = _selectedDay.asStateFlow()
 
   private val _isWeekView = MutableStateFlow(false)
@@ -122,15 +127,18 @@ class CampusViewModel(
   fun checkPassword(password: String, email: String): PasswordCheck = repository.auth.checkPassword(password, email)
 
   fun signUp(
+    universityId: String,
     fullName: String,
     email: String,
     idNumber: String,
     isStaff: Boolean,
     programmeOrDepartment: String,
     password: String
-  ): AuthOutcome = repository.auth.signUp(fullName, email, idNumber, isStaff, programmeOrDepartment, password)
+  ): AuthOutcome =
+    repository.auth.signUp(universityId, fullName, email, idNumber, isStaff, programmeOrDepartment, password)
 
-  fun signIn(email: String, password: String): AuthOutcome = repository.auth.signIn(email, password)
+  /** [identifier] is a registration/staff number or an email. */
+  fun signIn(identifier: String, password: String): AuthOutcome = repository.auth.signIn(identifier, password)
 
   fun submitCode(purpose: CodePurpose, email: String, code: String): AuthOutcome =
     repository.auth.submitCode(purpose, email, code)
@@ -164,7 +172,7 @@ class CampusViewModel(
 
   private fun resetNavigation() {
     _currentTab.value = ScreenTab.HOME
-    _selectedDay.value = 1
+    _selectedDay.value = todayDay()
     _isWeekView.value = false
     _announcementFilter.value = "ALL"
     _submissionFilterCourse.value = "ALL"
@@ -174,9 +182,10 @@ class CampusViewModel(
   fun authErrorText(error: AuthError): String = when (error) {
     AuthError.NAME_REQUIRED -> t("Please enter your full name.", "Tafadhali andika jina lako kamili.")
     AuthError.EMAIL_INVALID -> t("That email address does not look right.", "Anwani hii ya barua pepe haionekani sahihi.")
-    AuthError.EMAIL_NOT_UNIVERSITY -> t(
-      "Use your university email (ending in @campus.ac.tz).",
-      "Tumia barua pepe ya chuo (inayoishia @campus.ac.tz)."
+    AuthError.UNIVERSITY_REQUIRED -> t("Please choose your university.", "Tafadhali chagua chuo chako.")
+    AuthError.USE_EMAIL -> t(
+      "That number exists at more than one university. Sign in with your email instead.",
+      "Namba hiyo ipo katika vyuo zaidi ya kimoja. Ingia kwa barua pepe yako."
     )
     AuthError.EMAIL_TAKEN -> t("An account with this email already exists.", "Akaunti yenye barua pepe hii tayari ipo.")
     AuthError.NUMBER_INVALID -> t(
@@ -208,12 +217,17 @@ class CampusViewModel(
   fun passwordProblemText(problem: PasswordProblem): String = when (problem) {
     PasswordProblem.TOO_SHORT -> t("At least 8 characters", "Angalau herufi 8")
     PasswordProblem.COMMON -> t("Too common: easy to guess", "Imezoeleka mno: rahisi kubashiri")
-    PasswordProblem.NEEDS_LETTER_AND_DIGIT -> t("Use letters and numbers", "Tumia herufi na namba")
     PasswordProblem.CONTAINS_EMAIL -> t("Do not include your email name", "Usiweke jina la barua pepe yako")
     PasswordProblem.REPEATED -> t("Too repetitive", "Inarudiarudia mno")
   }
 
   // ---------- Navigation ----------
+
+  /** Today as Monday = 1 ... Saturday = 6. Sunday shows Monday, the next teaching day. */
+  fun todayDay(): Int = when (java.util.Calendar.getInstance().get(java.util.Calendar.DAY_OF_WEEK)) {
+    java.util.Calendar.SUNDAY -> 1
+    else -> java.util.Calendar.getInstance().get(java.util.Calendar.DAY_OF_WEEK) - 1
+  }
 
   fun canEditOrDelete(uploaderOrAuthorId: String): Boolean = repository.canEditOrDelete(uploaderOrAuthorId)
 
@@ -434,7 +448,8 @@ class CampusViewModel(
 
   // ---------- Registry ----------
 
-  fun registryMatches(user: UserProfile): Boolean = repository.registryMatches(user)
+  /** True/false against the university list, or null when that university has not uploaded one. */
+  fun registryMatches(user: UserProfile): Boolean? = repository.registryMatches(user)
 
   fun approveUser(userId: String, role: Role, programme: String?, teaches: Set<String>) {
     repository.approveUser(userId, role, programme, teaches)

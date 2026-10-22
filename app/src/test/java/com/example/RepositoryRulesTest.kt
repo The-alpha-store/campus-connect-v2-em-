@@ -77,20 +77,20 @@ class RepositoryRulesTest {
   }
 
   @Test
-  fun `sign up rejects outside emails and weak passwords`() {
+  fun `sign up needs a real university and a strong enough password`() {
     val repo = CampusRepository()
-    val outside = repo.auth.signUp("Test Person", "test@gmail.com", "T25-03-00001", false, SeedUsers.programmes.first(), "Str0ng#Pass99")
-    assertEquals(AuthError.EMAIL_NOT_UNIVERSITY, (outside as AuthOutcome.Failure).error)
-    val weak = repo.auth.signUp("Test Person", "t.person@campus.ac.tz", "T25-03-00001", false, SeedUsers.programmes.first(), "password1")
+    val outside = repo.auth.signUp("nowhere", "Test Person", "test@gmail.com", "T25-03-00001", false, "BSc Computer Science", "Str0ng#Pass99")
+    assertEquals(AuthError.UNIVERSITY_REQUIRED, (outside as AuthOutcome.Failure).error)
+    val weak = repo.auth.signUp("cuom", "Test Person", "t.person@gmail.com", "T25-03-00001", false, "BSc Computer Science", "password1")
     assertEquals(AuthError.PASSWORD_WEAK, (weak as AuthOutcome.Failure).error)
   }
 
   @Test
   fun `nobody can sign up as lecturer or admin and pending accounts see nothing`() {
     val repo = CampusRepository()
-    val out = repo.auth.signUp("Eng. New Staff", "n.staff@campus.ac.tz", "STF-CS-099", true, "Computer Science", "Str0ng#Pass99")
+    val out = repo.auth.signUp("cuom", "Eng. New Staff", "n.staff@gmail.com", "STF-CS-099", true, "Computer Science", "Str0ng#Pass99")
     assertTrue(out is AuthOutcome.NeedCode)
-    val verified = repo.auth.submitCode(CodePurpose.VERIFY_EMAIL, "n.staff@campus.ac.tz", repo.auth.visibleCode.value!!)
+    val verified = repo.auth.submitCode(CodePurpose.VERIFY_EMAIL, "n.staff@gmail.com", repo.auth.visibleCode.value!!)
     assertTrue(verified is AuthOutcome.Success)
 
     val me = repo.currentUser.value
@@ -282,5 +282,49 @@ class RepositoryRulesTest {
     assertNull(repo.session.value)
     assertTrue(repo.auth.signIn(SeedUsers.asha.email, SeedUsers.SAMPLE_PASSWORD) is AuthOutcome.Failure)
     assertTrue(repo.auth.signIn(SeedUsers.asha.email, "Brand#New2026x") is AuthOutcome.Success)
+  }
+
+  @Test
+  fun `any email works and a registration number in any format can sign in`() {
+    val repo = CampusRepository()
+    val out = repo.auth.signUp("ifm", "Amina Said", "amina.said@yahoo.com", "ifm/2024/bsc/0042", false, "Bachelor of Accounting", "Walk-to-school-9")
+    assertTrue(out is AuthOutcome.NeedCode)
+    repo.auth.submitCode(CodePurpose.VERIFY_EMAIL, "amina.said@yahoo.com", repo.auth.visibleCode.value!!)
+    repo.signOut()
+
+    // Sign in with the registration number alone, typed in a different case.
+    val again = repo.auth.signIn("IFM/2024/BSC/0042", "Walk-to-school-9")
+    assertTrue(again is AuthOutcome.Success)
+    assertEquals("ifm", repo.currentUser.value.universityId)
+  }
+
+  @Test
+  fun `a registration number is unique inside its university but can repeat across universities`() {
+    val repo = CampusRepository()
+    val same = repo.auth.signUp("cuom", "Someone Else", "else@gmail.com", "T22-03-08492", false, "BSc Computer Science", "Another-pass-77")
+    assertEquals(AuthError.NUMBER_TAKEN, (same as AuthOutcome.Failure).error)
+    val other = repo.auth.signUp("udsm", "Someone Else", "else@gmail.com", "T22-03-08492", false, "", "Another-pass-77")
+    assertTrue(other is AuthOutcome.NeedCode)
+  }
+
+  @Test
+  fun `universities are kept apart`() {
+    val repo = CampusRepository()
+    signInAs(repo, SeedUsers.ifmRegistry)
+    // The IFM registry sees no Cuom sessions, notices, accounts or audit entries.
+    assertTrue(repo.sessions.value.isEmpty())
+    assertTrue(repo.announcements.value.isEmpty())
+    assertTrue(repo.pendingUsers.value.none { it.universityId != "ifm" })
+    assertTrue(repo.auditLogs.value.none { it.universityId != "ifm" })
+    // ...and cannot approve a Cuom account.
+    repo.approveUser(SeedUsers.baraka.id, Role.STUDENT, "BSc Information Systems", emptySet())
+    assertEquals(AccountStatus.PENDING, repo.auth.accounts.value.getValue(SeedUsers.baraka.id).profile.status)
+
+    // A Cuom campus-wide notice never reaches an IFM student.
+    signInAs(repo, SeedUsers.emanuel)
+    assertNull(repo.publishAnnouncement("Cuom only", "x", AudienceType.CAMPUS, "Whole campus", "", AnnouncementPriority.NORMAL))
+    signInAs(repo, SeedUsers.ifmStudent)
+    assertTrue(repo.announcements.value.none { it.title == "Cuom only" })
+    assertTrue(repo.notifications.value.none { it.title == "Cuom only" })
   }
 }

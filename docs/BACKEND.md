@@ -12,7 +12,7 @@ app or a direct API call gets the same answer: *"You are not allowed to see that
 |---|---|
 | `supabase/migrations/20261021000000_campusconnect_v2.sql` | The whole schema: tables, row-level security, limits, audit log, storage rules, server functions. Safe to run twice. |
 | `supabase/seed.sql` | **Development only.** Fake people and sample data. Password for every sample account: `Campus#2026`. Never run it on a real project. |
-| `supabase/tests/rls.test.sql` | 105 pgTAP checks of who may see and do what. |
+| `supabase/tests/rls.test.sql` | 126 pgTAP checks of who may see and do what, including that universities cannot see each other. |
 | `supabase/config.toml` | Local and CI settings (email code, password rules, second step). |
 | `.github/workflows/ci.yml` | Android build + unit tests, and database migration + tests, on every push and pull request. |
 | `.github/workflows/deploy-supabase.yml` | Pushes new migrations to your hosted project (needs approval). |
@@ -20,6 +20,27 @@ app or a direct API call gets the same answer: *"You are not allowed to see that
 
 There were no SQL files or workflows in the uploaded source, so these are new. If you have SQL
 elsewhere (for example in the Supabase dashboard), compare it with the migration before running it.
+
+## Universities: one app, many campuses
+
+Every person chooses their **university** when they sign up, and everything they do stays inside it.
+
+- **Any email works** (Gmail, Yahoo, a university address). It is used for the sign-in code and password reset.
+- **Registration and staff numbers have no required format.** Each campus writes them differently. A number is
+  unique *inside* its university, so two campuses may use the same one. People sign in with their
+  registration number or their email.
+- Each university has its **own administrators**. An administrator sees, approves and suspends only people of
+  their own university, and reads only that university's audit log. Another university's data is invisible to them.
+- Course codes are made unique across campuses with a prefix built by the database (`CUOM:CS210`). Apps send
+  the short code (`CS210`) and show the short code.
+- A university that has not set up programmes yet still works: its students type their programme, and its
+  administrator assigns courses later. A university that has not uploaded a student/staff list simply gets
+  "no list to check against" in the approval queue.
+- Add a campus with one row: `insert into universities (code, name) values ('UDOM', 'University of Dodoma');`
+  then create its first administrator (below).
+
+This is the first version of campus sign-up. Rules that need each campus's agreement (number formats, email
+checks, shared lists) can be added later per university.
 
 ## Who may do what
 
@@ -59,9 +80,9 @@ What each person can see and do (all enforced by row-level security):
 
 Other protections built in:
 
-- **Sign-up** accepts only the university email domain (`app_settings.email_domain`). Whatever role or
-  status the app sends is ignored: every new account is a **pending student**. Only an administrator can
-  change that, through `approve_account`, which can never create an administrator.
+- **Sign-up** must name a university. Whatever role or status the app sends is ignored: every new account is a
+  **pending student** of that university. Only that university's administrator can change that, through
+  `approve_account`, which can never create an administrator.
 - **Administrators need the second step.** `is_admin()` is true only when the sign-in carries `aal2`
   (set `require_admin_mfa` to `false` in `app_settings` only while bootstrapping).
 - **Suspending an account works immediately.** Every policy checks the account status on every request.
@@ -77,19 +98,20 @@ Other protections built in:
 1. Create the project at supabase.com.
 2. Install the CLI, then: `supabase login` and `supabase link --project-ref <your-ref>`.
 3. `supabase db push` (applies the migration; does **not** run the seed).
-4. Add your real reference data: rows in `programmes`, `courses`, `programme_courses`,
-   `university_students`, `university_staff` (the registry's lists).
+4. Add your campuses and their reference data: rows in `universities`, then (per university, optional)
+   `programmes`, `courses` (give `university_id` and `short_code`), `programme_courses`, and the registry's
+   `university_students` / `university_staff` lists.
 5. **Dashboard > Authentication** settings, matching `supabase/config.toml`:
    - Email provider on, **Confirm email** on, OTP length 6, OTP expiry 600 s.
-   - Minimum password length 8, require letters and digits. On the Pro plan also switch on
+   - Minimum password length 8, no other password rules. On the Pro plan also switch on
      *leaked password protection*.
    - Multi-factor (TOTP) on.
    - Refresh token rotation on. Leave anonymous sign-ins off.
    - Site URL / redirect: `campusconnect://login-callback`.
-6. Create the first administrator:
-   1. Sign up in the app with the registry email and verify the code.
-   2. In the SQL editor: `select public.bootstrap_first_admin('registry@campus.ac.tz', 'STF-ADM-001');`
-      (works only while there is no administrator).
+6. Create the first administrator **of each university**:
+   1. Sign up in the app, choosing that university, and verify the code.
+   2. In the SQL editor: `select public.bootstrap_first_admin('registry@example.com', 'STAFF-NUMBER');`
+      (works only while that university has no administrator).
    3. Sign in, enrol in two-step sign-in (TOTP), sign in again. Only then do admin powers switch on.
 7. After that, approve every other account from the app's Admin tab (`approve_account`).
 
@@ -124,7 +146,9 @@ The app's sign-in, approval, limits and visibility rules are written to **match*
 repository tests check them. But the app still keeps its data in memory and does not call Supabase yet:
 
 - `AuthRepository.kt` is a local stand-in. Replace its methods with Supabase Auth calls
-  (`signUp` with the metadata keys `full_name`, `id_number`, `is_staff`, `programme`, `department`).
+  (`signUp` with the metadata keys `university` (the university code), `full_name`, `id_number`, `is_staff`,
+  `programme`, `department`). Sign-in by registration number needs a small lookup (email by number) before
+  calling Supabase Auth, because Auth itself signs in with an email.
   The emailed code is currently **shown on screen** (`AuthConfig.SHOW_CODES_ON_SCREEN`); a real build sends it by email.
 - `CampusRepository.kt` should read and write the tables above. Use `register_device`, `retract_announcement`,
   `remind_unread`, `announcement_stats`, `approve_account`, `my_limits` and `export_my_data` for the server-side parts.

@@ -117,7 +117,8 @@ fun DeadlinesScreen(
             )
           }
 
-          items(pendingDeadlines) { dl ->
+          items(pendingDeadlines, key = { it.id }) { dl ->
+          Box(modifier = Modifier.animateItem()) {
             val canModerate = viewModel.canEditOrDelete(dl.lecturerId)
 
             DeadlineCard(
@@ -127,7 +128,9 @@ fun DeadlinesScreen(
               onDeleteClick = if (canModerate) { { viewModel.deleteDeadline(dl.id) } } else null,
               canModerate = canModerate
             )
+          
           }
+        }
         }
 
         if (completedDeadlines.isNotEmpty()) {
@@ -141,7 +144,8 @@ fun DeadlinesScreen(
             )
           }
 
-          items(completedDeadlines) { dl ->
+          items(completedDeadlines, key = { it.id }) { dl ->
+          Box(modifier = Modifier.animateItem()) {
             val canModerate = viewModel.canEditOrDelete(dl.lecturerId)
 
             DeadlineCard(
@@ -151,7 +155,9 @@ fun DeadlinesScreen(
               onDeleteClick = if (canModerate) { { viewModel.deleteDeadline(dl.id) } } else null,
               canModerate = canModerate
             )
+          
           }
+        }
         }
 
         item {
